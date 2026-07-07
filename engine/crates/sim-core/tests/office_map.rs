@@ -174,20 +174,34 @@ fn astar_golden_door_to_deska01_chair() {
 /// Second golden: door -> the VP chair inside the partitioned exec bay.
 /// The bay is fenced by partitions left/top/right; its open side is the
 /// south (y=5..) plus the free cell (3,4) east of the chair — the
-/// deterministic tie-break enters through (3,4).
+/// deterministic tie-break enters through (3,4). Like the deskA-01
+/// golden above, the ENTIRE 48-step path is pinned: any engine change
+/// that alters it must update this expectation visibly in a PR.
 #[test]
 fn astar_golden_door_to_exec_vp_chair() {
     let ws = load_world_state_from_fixture_files().unwrap();
     let path = astar(&ws.grid, &HashSet::new(), (23, 31), (2, 4)).expect("path exists");
-    assert_eq!(*path.last().unwrap(), (2, 4));
+
+    // Shape produced by the deterministic tie-break (f, h, idx): straight
+    // north along the central corridor x=23 up to y=5, straight west
+    // along y=5 to the bay entry column x=3, one step north into the bay
+    // entry cell (3,4), then west onto the chair (2,4). Optimality:
+    // manhattan distance (48) equals path length (partitions sit off the
+    // tie-broken shortest route, so no detour cost).
+    let mut golden: Vec<(i32, i32)> = Vec::new();
+    for y in (5..=30).rev() {
+        golden.push((23, y)); // north leg x=23, y=30..=5
+    }
+    for x in (3..=22).rev() {
+        golden.push((x, 5)); // west leg y=5, x=22..=3
+    }
+    golden.push((3, 4)); // north into the bay entry cell
+    golden.push((2, 4)); // west onto the VP chair
+    assert_eq!(golden.len(), 48, "golden itself must stay 48 steps");
     assert_eq!(
-        path[path.len() - 2],
-        (3, 4),
-        "deterministic entry into the VP bay is from the east cell (3,4)"
+        path, golden,
+        "golden A* path changed — update deliberately via PR"
     );
-    // Optimality: manhattan distance (48) equals path length (partitions
-    // sit off the tie-broken shortest route, so no detour cost).
-    assert_eq!(path.len(), 48);
 }
 
 #[test]

@@ -33,11 +33,13 @@ fn commute_headless_all_nine_seated_by_0930() {
 
     ws.resume();
 
+    let door_tiles = ws.map.door_tiles.clone();
     let mut last_pos: HashMap<Uuid, (i32, i32)> = HashMap::new();
     let mut no_progress_ticks: HashMap<Uuid, u32> = HashMap::new();
     let mut max_no_progress: u32 = 0;
     let mut status_events: HashMap<Uuid, Vec<String>> = HashMap::new();
     let mut spawn_clock: HashMap<Uuid, i32> = HashMap::new();
+    let mut first_move: HashMap<Uuid, (i32, i32)> = HashMap::new();
     let mut ticks = 0u32;
 
     while ws.world.sim_clock_sec < game_secs(9, 30) {
@@ -55,6 +57,12 @@ fn commute_headless_all_nine_seated_by_0930() {
                 if status == "walking" {
                     spawn_clock.insert(*agent_id, ws.world.sim_clock_sec);
                 }
+            }
+            if let SimEvent::AgentMoved { agent_id, x, y } = ev {
+                // First agent_moved per agent = where they entered the
+                // floor (the spawn branch emits it right after the
+                // 'walking' status event).
+                first_move.entry(*agent_id).or_insert((*x, *y));
             }
         }
 
@@ -151,6 +159,20 @@ fn commute_headless_all_nine_seated_by_0930() {
             a.agent.name,
             seen,
             a.spawn_sec
+        );
+    }
+
+    // Spawn POSITIONS: the header claims agents spawn at the main door —
+    // every agent's first agent_moved (emitted by the spawn branch) must
+    // land on one of the map's door tiles, not just at the right time.
+    for a in &ws.agents {
+        let pos = first_move[&a.agent.id];
+        assert!(
+            door_tiles.contains(&pos),
+            "{} entered the floor at {:?}, which is not a door tile {:?}",
+            a.agent.name,
+            pos,
+            door_tiles
         );
     }
 
