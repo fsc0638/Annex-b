@@ -1,0 +1,26 @@
+# Backups (project-local backup dir per user's global maintenance protocol)
+99-backups/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Rust
+/target/
+engine/target/
+**/target/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.pnpm-store/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
