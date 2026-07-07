@@ -45,6 +45,13 @@ services:
       DAILY_BUDGET_USD: ${DAILY_BUDGET_USD:-2.0}
       PORT: 8080
       RUST_LOG: ${RUST_LOG:-info}
+      # Phase 1: resident world source (db = most recent seeded world;
+      # fixture = DB-less demo). The tmj shell map is read at runtime from
+      # the bind-mounted assets volume below.
+      WORLD_SOURCE: ${WORLD_SOURCE:-db}
+      TMJ_PATH: /app/assets/maps/office_shell.tmj
+    volumes:
+      - ./assets:/app/assets:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

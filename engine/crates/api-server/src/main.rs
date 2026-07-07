@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use api_server::{router, state::AppState};
+use api_server::{router, sim, state::AppState, state::SimHandle};
 use llm_gateway::Gateway;
 use sqlx::postgres::PgPoolOptions;
 
@@ -36,7 +36,27 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let state = AppState { db, gateway };
+    // Resident world (Phase 1): WORLD_SOURCE=db (default) loads the most
+    // recent seeded world; WORLD_SOURCE=fixture is the DB-less demo mode.
+    // Failure to load degrades /ws to 503 instead of killing the server.
+    let sim = match sim::load_world_state(db.as_ref()).await {
+        Ok(world) => {
+            tracing::info!(
+                agents = world.agents.len(),
+                layout = world.layout.len(),
+                "world loaded; starting tick loop"
+            );
+            let handle = SimHandle::new(world);
+            sim::spawn_tick_loop(handle.clone());
+            Some(handle)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "no world loaded; /ws will answer 503");
+            None
+        }
+    };
+
+    let state = AppState { db, gateway, sim };
     let app = router::build_router(state);
 
     let port: u16 = std::env::var("PORT")

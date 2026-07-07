@@ -19,6 +19,7 @@ async fn healthz_returns_200_without_db_or_ollama() {
     let state = AppState {
         db: None,
         gateway: Arc::new(Gateway::from_env()),
+        sim: None,
     };
     let app = build_router(state);
 

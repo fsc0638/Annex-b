@@ -13,7 +13,8 @@ name = "api-server"
 path = "src/main.rs"
 
 [dependencies]
-sim-core = { path = "../sim-core" }
+# `db` feature: sim-core's sqlx runtime-query loading path (WORLD_SOURCE=db).
+sim-core = { path = "../sim-core", features = ["db"] }
 agent-core = { path = "../agent-core" }
 llm-gateway = { path = "../llm-gateway" }
 tokio.workspace = true
@@ -26,7 +27,12 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 dotenvy.workspace = true
+# WebSocket handler needs StreamExt/SinkExt to split the axum socket.
+futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
+# Real-socket WS client for /ws integration tests (tower::oneshot cannot
+# drive a duplex WebSocket stream). 0.21 matches axum 0.7's tungstenite.
+tokio-tungstenite = "0.21"
