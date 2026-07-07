@@ -35,6 +35,11 @@ const DIR_LEFT = 1;
 const DIR_RIGHT = 2;
 const DIR_UP = 3;
 
+// Walk-cycle animation rate at store speed=1, and the multiplier cap so the
+// legs don't flicker unreadably fast at the x5 time control (spec 7.1).
+const ANIM_SPEED_BASE = 0.12;
+const ANIM_SPEED_MAX = 0.6;
+
 const FURNITURE_COLORS: Record<LayoutItemRow["kind"], number> = {
   desk: 0x8a6f4d,
   exec_desk: 0x6e5238,
@@ -96,8 +101,18 @@ function sliceSpriteSheet(sheet: Texture): Texture[][] {
 }
 
 function drawFurniture(container: Container, layout: LayoutItemRow[]) {
-  container.removeChildren();
-  const g = new Graphics();
+  // Redraw in place rather than removeChildren() + a brand new Graphics:
+  // removeChildren() only detaches the old Graphics from the display
+  // list, it doesn't destroy its GPU geometry, so a fresh Container on
+  // every world_snapshot leaked one GPU buffer per snapshot. A single
+  // persistent Graphics reused via clear() has no such leak.
+  let g = container.children[0] as Graphics | undefined;
+  if (!g) {
+    g = new Graphics();
+    container.addChild(g);
+  } else {
+    g.clear();
+  }
   for (const item of layout) {
     const fp = footprintOf(item);
     const px = fp.x * TILE;
@@ -115,7 +130,6 @@ function drawFurniture(container: Container, layout: LayoutItemRow[]) {
       g.rect(px + 2, py + 2, w - 4, 3).fill(0xffffff, 0.12); // top light
     }
   }
-  container.addChild(g);
 }
 
 export default function OfficeCanvas() {
@@ -180,7 +194,24 @@ export default function OfficeCanvas() {
       if (cancelled) return;
 
       // ---- Dynamic layers driven by the store ------------------------
-      const visuals = new Map<string, AgentVisual>();
+      // Keyed by agent id. Holds an in-flight *promise* for the visual,
+      // registered synchronously (before any await) the first time an
+      // agent is seen. Concurrent syncAgents() calls for the same agent
+      // (e.g. the snapshot's syncAgents racing an agent_moved-triggered
+      // syncAgents right after reconnect) therefore all await the SAME
+      // promise instead of each independently reaching `visuals.set` after
+      // their own Assets.load — which used to build two sprite/label
+      // Containers and addChild both, leaving a frozen duplicate ("ghost")
+      // for whichever one lost the race. The map is the single source of
+      // truth for both creation and the cleanup sweep below, so this
+      // makes a duplicate addChild structurally impossible rather than a
+      // matter of timing luck.
+      const visuals = new Map<string, Promise<AgentVisual>>();
+      // Resolved mirror of `visuals`, kept in sync as each promise settles.
+      // The per-frame ticker below runs synchronously (PixiJS ticker
+      // callback) and only needs cheap read access to already-built
+      // visuals, so it iterates this instead of awaiting `visuals`.
+      const resolvedVisuals = new Map<string, AgentVisual>();
       const labelStyle = new TextStyle({
         fontFamily: 'system-ui, "PingFang TC", "Noto Sans TC", sans-serif',
         fontSize: 12,
@@ -188,16 +219,14 @@ export default function OfficeCanvas() {
         stroke: { color: 0x000000, width: 3 },
       });
 
-      async function ensureVisual(agent: AgentRow): Promise<AgentVisual> {
-        const existing = visuals.get(agent.id);
-        if (existing) return existing;
+      async function buildVisual(agent: AgentRow): Promise<AgentVisual> {
         const sheetTex = (await Assets.load(
           `/sprites/agents/${agent.sprite_key}.png`
         )) as Texture;
         sheetTex.source.scaleMode = "nearest";
         const texturesByDir = sliceSpriteSheet(sheetTex);
         const sprite = new AnimatedSprite(texturesByDir[DIR_DOWN]);
-        sprite.animationSpeed = 0.12;
+        sprite.animationSpeed = ANIM_SPEED_BASE;
         sprite.gotoAndStop(1);
         const label = new Text({ text: agent.name, style: labelStyle });
         label.anchor.set(0.5, 1);
@@ -218,8 +247,24 @@ export default function OfficeCanvas() {
         };
         root.x = visual.targetX;
         root.y = visual.targetY;
-        visuals.set(agent.id, visual);
         return visual;
+      }
+
+      function ensureVisual(agent: AgentRow): Promise<AgentVisual> {
+        const existing = visuals.get(agent.id);
+        if (existing) return existing;
+        const pending = buildVisual(agent).then((v) => {
+          // Only publish into the resolved mirror if this agent wasn't
+          // removed (and its pending promise swept away) while loading.
+          if (visuals.get(agent.id) === pending) {
+            resolvedVisuals.set(agent.id, v);
+          } else {
+            v.root.destroy({ children: true });
+          }
+          return v;
+        });
+        visuals.set(agent.id, pending);
+        return pending;
       }
 
       function setDir(v: AgentVisual, dir: number) {
@@ -256,13 +301,32 @@ export default function OfficeCanvas() {
             v.status = agent.current_status;
             if (v.status === "seated") setDir(v, DIR_UP); // face the desk
           }
-          v.root.visible = v.status !== "commuting";
+          // Mock mode (NEXT_PUBLIC_MOCK_SNAPSHOT=1) never ticks the sim
+          // forward, so all 9 seed agents stay "commuting" forever (spec
+          // 07:00 kickoff) and hiding them would render an empty office —
+          // not useful for UI work. Show them dimmed instead; normal
+          // (live ws) mode keeps commuting agents fully hidden, since
+          // there they are transiently off-floor before their door spawn.
+          const isMock = useGameStore.getState().conn === "mock";
+          if (v.status === "commuting" && isMock) {
+            v.root.visible = true;
+            v.root.alpha = 0.5;
+          } else {
+            v.root.visible = v.status !== "commuting";
+            v.root.alpha = 1;
+          }
         }
-        // Remove visuals for agents that vanished from the snapshot.
-        for (const [id, v] of visuals) {
+        // Remove visuals for agents that vanished from the snapshot. The
+        // map is the single source of truth for every Container ever
+        // built (including ones still in flight), so this sweep is
+        // guaranteed to reach every addChild'd root — awaiting each
+        // pending promise first means an agent removed the same instant
+        // its visual finished loading still gets cleaned up correctly.
+        for (const [id, pending] of visuals) {
           if (!agents[id]) {
-            v.root.destroy({ children: true });
             visuals.delete(id);
+            resolvedVisuals.delete(id);
+            void pending.then((v) => v.root.destroy({ children: true }));
           }
         }
       }
@@ -291,7 +355,12 @@ export default function OfficeCanvas() {
         const { world, speed, running } = useGameStore.getState();
         const tickMs = world ? Math.max(world.tick_ms, 1) / Math.max(speed, 1) : 1000;
         const pxPerMs = TILE / tickMs;
-        for (const v of visuals.values()) {
+        // Walk-cycle rate scales with the time-control speed multiplier so
+        // legs don't appear to under-cycle relative to how fast agents
+        // glide across tiles at x2/x5, capped so it stays readable.
+        const animSpeed = Math.min(ANIM_SPEED_BASE * Math.max(speed, 1), ANIM_SPEED_MAX);
+        for (const v of resolvedVisuals.values()) {
+          v.sprite.animationSpeed = animSpeed;
           const dx = v.targetX - v.root.x;
           const dy = v.targetY - v.root.y;
           const dist = Math.hypot(dx, dy);

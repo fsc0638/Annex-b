@@ -127,14 +127,17 @@ export function formatClock(simClockSec: number): string {
 }
 
 /** Effective footprint after rotation (90/270 swap w/h) — same rule as
- * sim-core's grid::footprint. */
+ * sim-core's grid::footprint, including the rem_euclid(360) normalization
+ * so out-of-range values (450, -90, ...) resolve identically on both
+ * sides instead of the two disagreeing about a footprint. */
 export function footprintOf(item: LayoutItemRow): {
   x: number;
   y: number;
   w: number;
   h: number;
 } {
-  const swap = item.rotation === 90 || item.rotation === 270;
+  const rotation = ((item.rotation % 360) + 360) % 360;
+  const swap = rotation === 90 || rotation === 270;
   return {
     x: item.pos_x,
     y: item.pos_y,

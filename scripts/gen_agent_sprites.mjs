@@ -6,8 +6,10 @@
 // Sheet layout per agent (96x128 PNG, 32x32 frames):
 //   rows    = facing direction: 0=down, 1=left, 2=right, 3=up
 //   columns = walk frames: 0=left-step, 1=stand, 2=right-step
-// The frontend animates columns 0->1->2->1 while moving and rests on
-// column 1 when idle/seated.
+// The frontend (web/src/game/OfficeCanvas.tsx) loads all 3 columns per
+// direction into a looping PixiJS AnimatedSprite (default loop = true),
+// so it animates columns 0->1->2->0->1->2->... while moving, and rests
+// on column 1 (the neutral "stand" frame) when idle/seated.
 //
 // sprite_key list is parsed from scripts/seed_world.sh (single source of
 // truth), so a renamed/added agent shows up here automatically. Each
