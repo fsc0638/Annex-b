@@ -290,18 +290,19 @@ impl WorldState {
                         // the chair may be only momentarily unreachable
                         // because of standing agents) — but count the
                         // consecutive failures and get LOUD once the
-                        // streak says this is no longer momentary. The
-                        // event mirrors the stuck_unreachable pattern in
-                        // the spawn branch, except current_status stays
-                        // "walking" so the wait/retry loop keeps running.
+                        // streak says this is no longer momentary. This is a
+                        // status-free `AgentStuck` observability signal, NOT
+                        // an `AgentStatus`: current_status stays "walking"
+                        // (the wait/retry loop keeps running), so the client
+                        // is never told to render a "stuck" state the server
+                        // does not actually hold.
                         self.agents[i].reroute_fails += 1;
                         if self.agents[i]
                             .reroute_fails
                             .is_multiple_of(STUCK_REROUTE_STREAK)
                         {
-                            events.push(SimEvent::AgentStatus {
+                            events.push(SimEvent::AgentStuck {
                                 agent_id: self.agents[i].agent.id,
-                                status: "stuck_in_place".into(),
                             });
                         }
                     }
@@ -644,21 +645,36 @@ mod tests {
         // ticks each (100), with slack.
         for _ in 0..220 {
             for ev in ws.step() {
-                if let SimEvent::AgentStatus { agent_id, status } = ev {
-                    if status == "stuck_in_place" {
+                match ev {
+                    // The loud stuck signal rides its own status-free event
+                    // type; it must be an AgentStuck, never an AgentStatus.
+                    SimEvent::AgentStuck { agent_id } => {
                         assert_eq!(agent_id, walker_id, "only the walker can be stuck");
                         stuck_events += 1;
                     }
-                    assert_ne!(
-                        status, "stuck_unreachable",
-                        "a blocked-by-agent walker must keep waiting, not be marked unreachable"
-                    );
+                    SimEvent::AgentStatus { status, .. } => {
+                        // Front/back status-divergence guard: the stuck
+                        // signal must NOT leak through the agent_status
+                        // channel, or the client would render a "stuck"
+                        // status the server never set (current_status is
+                        // still "walking"). It also must never demote the
+                        // waiting walker to stuck_unreachable.
+                        assert_ne!(
+                            status, "stuck_in_place",
+                            "stuck must not ride the agent_status channel (would diverge from server current_status)"
+                        );
+                        assert_ne!(
+                            status, "stuck_unreachable",
+                            "a blocked-by-agent walker must keep waiting, not be marked unreachable"
+                        );
+                    }
+                    _ => {}
                 }
             }
         }
         assert!(
             stuck_events >= 1,
-            "expected a loud stuck_in_place event after {STUCK_REROUTE_STREAK} consecutive reroute failures"
+            "expected a loud agent_stuck event after {STUCK_REROUTE_STREAK} consecutive reroute failures"
         );
         assert_eq!(
             ws.agents[0].agent.current_status, STATUS_SEATED,

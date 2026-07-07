@@ -101,6 +101,15 @@ export interface AgentStatusMsg {
   status: string;
 }
 
+/** Loud, status-free "this walker has been failing to reroute" signal.
+ * It carries NO status: server-side current_status stays "walking". The
+ * client treats it as an observability warning only and must NOT mutate any
+ * rendered agent state from it. */
+export interface AgentStuckMsg {
+  type: "agent_stuck";
+  agent_id: string;
+}
+
 export interface WorldPausedMsg {
   type: "world_paused";
 }
@@ -115,6 +124,7 @@ export type ServerMsg =
   | TickMsg
   | AgentMovedMsg
   | AgentStatusMsg
+  | AgentStuckMsg
   | WorldPausedMsg
   | ErrorMsg;
 

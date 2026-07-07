@@ -89,6 +89,17 @@ export const useGameStore = create<GameState>((set) => ({
             },
           };
         }
+        case "agent_stuck": {
+          // Purely observational: the server keeps current_status as
+          // "walking" while a walker fails to reroute, so we must NOT touch
+          // any rendered agent state here (doing so would diverge the client
+          // from the server and freeze the walk animation). Just surface it
+          // loudly for debugging.
+          console.warn(
+            `[sim] agent ${msg.agent_id} is stuck (reroute failing); still walking on the server`
+          );
+          return {};
+        }
         case "world_paused":
           return { running: false };
         case "error":

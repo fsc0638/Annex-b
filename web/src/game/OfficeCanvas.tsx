@@ -253,16 +253,31 @@ export default function OfficeCanvas() {
       function ensureVisual(agent: AgentRow): Promise<AgentVisual> {
         const existing = visuals.get(agent.id);
         if (existing) return existing;
-        const pending = buildVisual(agent).then((v) => {
-          // Only publish into the resolved mirror if this agent wasn't
-          // removed (and its pending promise swept away) while loading.
-          if (visuals.get(agent.id) === pending) {
-            resolvedVisuals.set(agent.id, v);
-          } else {
-            v.root.destroy({ children: true });
+        const pending = buildVisual(agent).then(
+          (v) => {
+            // Only publish into the resolved mirror if this agent wasn't
+            // removed (and its pending promise swept away) while loading.
+            if (visuals.get(agent.id) === pending) {
+              resolvedVisuals.set(agent.id, v);
+            } else {
+              v.root.destroy({ children: true });
+            }
+            return v;
+          },
+          (err) => {
+            // Load failed (e.g. a transient 404 on the sprite sheet). Evict
+            // this agent's cached promise so the NEXT syncAgents() rebuilds
+            // it from scratch instead of forever re-awaiting a rejected
+            // promise — the agent self-heals on the following sync. Only
+            // evict if we still own this slot (an agent removed mid-load may
+            // already have had its entry swept). Re-throw so the caller
+            // treats this as "skip this agent this round".
+            if (visuals.get(agent.id) === pending) {
+              visuals.delete(agent.id);
+            }
+            throw err;
           }
-          return v;
-        });
+        );
         visuals.set(agent.id, pending);
         return pending;
       }
@@ -278,7 +293,17 @@ export default function OfficeCanvas() {
 
       async function syncAgents(agents: Record<string, AgentRow>) {
         for (const agent of Object.values(agents)) {
-          const v = await ensureVisual(agent);
+          let v: AgentVisual;
+          try {
+            v = await ensureVisual(agent);
+          } catch {
+            // This agent's visual failed to load this round (ensureVisual
+            // already evicted its cached promise so the next sync retries).
+            // Skip ONLY this agent — the remaining agents in the roster must
+            // still receive their position/status updates, so we continue
+            // the loop instead of letting the throw abort it.
+            continue;
+          }
           const tx = agent.pos_x * TILE;
           const ty = agent.pos_y * TILE;
           if (tx !== v.targetX || ty !== v.targetY) {
@@ -326,7 +351,13 @@ export default function OfficeCanvas() {
           if (!agents[id]) {
             visuals.delete(id);
             resolvedVisuals.delete(id);
-            void pending.then((v) => v.root.destroy({ children: true }));
+            // The pending promise may reject (the sprite sheet 404'd): that
+            // failure needs no cleanup here (buildVisual never addChild'd a
+            // root), but it MUST be caught or it surfaces as an unhandled
+            // promise rejection.
+            void pending
+              .then((v) => v.root.destroy({ children: true }))
+              .catch(() => {});
           }
         }
       }
@@ -341,7 +372,12 @@ export default function OfficeCanvas() {
         }
         if (agents !== lastAgents) {
           lastAgents = agents;
-          void syncAgents(agents);
+          // Fire-and-forget: syncAgents already swallows per-agent load
+          // failures, but guard the whole call so any unexpected rejection
+          // can't become an unhandled promise rejection.
+          void syncAgents(agents).catch((err) => {
+            console.error("[sim] syncAgents failed", err);
+          });
         }
       };
       const initial = useGameStore.getState();
