@@ -16,10 +16,19 @@
 #                                         # unique world name; re-running
 #                                         # creates a NEW world row)
 #   scripts/seed_world.sh --knowledge-only
-#                                         # only upsert knowledge memories
-#                                         # for the most recently seeded
-#                                         # world; does not touch agents,
-#                                         # layout, or work_items
+#                                         # replace (delete + reseed) all
+#                                         # knowledge memories for the most
+#                                         # recently seeded world; does not
+#                                         # touch agents, layout, or
+#                                         # work_items
+#
+# WARNING (id-churn on --knowledge-only): this is delete-then-reinsert,
+# NOT an upsert — every re-run assigns brand-new `id`/`created_at`/
+# `last_access` values to every knowledge memory row, even ones whose
+# content didn't change. Anything that referenced a knowledge memory's old
+# `id` (e.g. another memory's `ref_ids`, or an `event_log` payload) will
+# silently dangle after a re-run. Do not run this flag against a world
+# with data that references specific knowledge-memory ids by value.
 #
 # Requires: psql reachable via $DATABASE_URL (compose environment is the
 # reference target per project instructions; this script is not expected
@@ -113,7 +122,7 @@ except Exception:
 
 # ---------------------------------------------------------------------
 # Knowledge-only mode: locate the most recently created world, then only
-# run the knowledge upsert block against it.
+# run the knowledge replace/reseed block against it.
 # ---------------------------------------------------------------------
 if [ "$KNOWLEDGE_ONLY" -eq 1 ]; then
   WORLD_ID=$("${PSQL[@]}" -t -A -c "select id from worlds order by created_at desc limit 1;")
@@ -406,6 +415,17 @@ reports_to_map as (
   from agents ag
   join all_agents aa on aa.id = ag.id
 ),
+-- Major #2 fix (docs/eval/p0-review.md): Appendix A.1 gives 阮曉青 a dual
+-- reporting line — reports_to=高子軒 (formal, already captured by
+-- reports_to_map above) plus 業務指導 from 沈書萍 (functional/dotted-line,
+-- not representable by the single reports_to FK). The generic rel_ins CTE
+-- below would otherwise mislabel (阮曉青→沈書萍) as an ordinary
+-- '同部門同事' peer pair, same as any other non-manager pair — so that one
+-- ordered pair is excluded from rel_ins's cross join here and given its
+-- own explicit row with descriptor='業務指導' immediately after. Reverse
+-- direction (沈書萍→阮曉青) intentionally stays '同部門同事' via the
+-- generic CTE (spec doesn't define a manager-eye-view descriptor for a
+-- dotted-line report; unchanged from before this fix).
 rel_ins as (
   insert into relationships (agent_id, target_id, affinity, descriptor, updated_day)
   select a1.id, a2.id, 0,
@@ -415,6 +435,13 @@ rel_ins as (
   cross join all_agents a2
   join reports_to_map rtm on rtm.agent_id = a1.id
   where a1.id <> a2.id
+    and not (a1.name = '阮曉青' and a2.name = '沈書萍')
+  returning agent_id
+),
+ruanxiaoqing_shenshuping_rel as (
+  insert into relationships (agent_id, target_id, affinity, descriptor, updated_day)
+  select temp_staff.id, specialist_senior.id, 0, '業務指導', 1
+  from temp_staff, specialist_senior
   returning agent_id
 ),
 -- 6 seed work_items (Appendix A.3). Item #2's title uses the fictional
@@ -444,19 +471,21 @@ work_items_ins as (
   returning id, kind
 )
 -- IMPORTANT: PostgreSQL only executes CTEs that are reachable from the
--- final query's FROM/JOIN graph. seat_update, rel_ins, and
--- work_items_ins are data-modifying CTEs with no other CTE depending on
--- them, so without being referenced here they would silently never run
--- (layout_ins/all_agents/new_world *are* transitively referenced by
--- rel_ins/work_items_ins, so this final select is what pulls the whole
--- graph — including seat_update and rel_ins and work_items_ins
--- themselves — into execution).
+-- final query's FROM/JOIN graph. seat_update, rel_ins,
+-- ruanxiaoqing_shenshuping_rel, and work_items_ins are data-modifying
+-- CTEs with no other CTE depending on them, so without being referenced
+-- here they would silently never run (layout_ins/all_agents/new_world
+-- *are* transitively referenced by rel_ins/work_items_ins, so this final
+-- select is what pulls the whole graph — including seat_update, rel_ins,
+-- ruanxiaoqing_shenshuping_rel, and work_items_ins themselves — into
+-- execution).
 select
   (select count(*) from new_world) as worlds_created,
   (select count(*) from all_agents) as agents_created,
   (select count(*) from layout_ins) as layout_items_created,
   (select count(*) from seat_update) as seats_assigned,
-  (select count(*) from rel_ins) as relationships_created,
+  (select count(*) from rel_ins) + (select count(*) from ruanxiaoqing_shenshuping_rel)
+    as relationships_created,
   (select count(*) from work_items_ins) as work_items_created;
 
 commit;
@@ -513,14 +542,17 @@ agent_id_for() {
 
 ALL_AGENT_NAMES=$(awk -F'|' '{print $1}' "$AGENT_MAP_FILE")
 
-# "Upsert" semantics for knowledge (per project instruction:
-# "--knowledge-only ... 只 upsert knowledge、不動其他資料"): the
-# `memories` table (spec section 4) has no unique key suitable as an
-# ON CONFLICT arbiter for a knowledge slice, and the DDL must not be
-# altered beyond the created_at addition. So "upsert" is implemented as
-# delete-then-reinsert of this world's kind='knowledge' rows, which is
-# idempotent across repeated --knowledge-only runs without touching any
-# other memory kind or any non-memories table.
+# Replace/reseed semantics for knowledge (per project instruction:
+# "--knowledge-only ... 只動 knowledge、不動其他資料"): the `memories`
+# table (spec section 4) has no unique key suitable as an ON CONFLICT
+# arbiter for a knowledge slice, and the DDL must not be altered beyond
+# the created_at addition. So this is implemented as delete-then-reinsert
+# of this world's kind='knowledge' rows — NOT an upsert: every row gets a
+# brand-new id/created_at/last_access on every run (see the id-churn
+# warning in this script's usage header). What IS preserved across
+# repeated --knowledge-only runs is content-level idempotency (no
+# duplicate/accumulating rows) and that no other memory kind or
+# non-memories table is touched.
 echo "== clearing existing knowledge memories for world $WORLD_ID before reseeding =="
 "${PSQL[@]}" -v ON_ERROR_STOP=1 -c "
   delete from memories
