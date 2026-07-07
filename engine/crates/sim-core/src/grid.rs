@@ -7,9 +7,15 @@ use crate::LayoutItem;
 
 /// Effective footprint (x, y, w, h) of a layout item on the tile grid.
 /// rotation 90/270 swaps w and h; pos stays the top-left anchor (same rule
-/// as the frontend renderer and the asset generators).
+/// as the frontend renderer and the asset generators). `rotation` is
+/// normalized via `rem_euclid(360)` before the 90/270 comparison, so
+/// out-of-range or negative values (e.g. 450 or -90, both equivalent to
+/// 90) are handled the same as their canonical form — the web-side
+/// `footprintOf` in web/src/game/types.ts normalizes identically so the
+/// two can never disagree about a footprint.
 pub fn footprint(item: &LayoutItem) -> (i32, i32, i32, i32) {
-    if item.rotation == 90 || item.rotation == 270 {
+    let rotation = item.rotation.rem_euclid(360);
+    if rotation == 90 || rotation == 270 {
         (item.pos_x, item.pos_y, item.h, item.w)
     } else {
         (item.pos_x, item.pos_y, item.w, item.h)
@@ -150,6 +156,34 @@ mod tests {
         assert!(grid.is_blocked(4, 2));
         assert!(!grid.is_blocked(2, 3), "unrotated cell must stay free");
         assert!(!grid.is_blocked(2, 4));
+    }
+
+    #[test]
+    fn rotation_450_and_negative_90_normalize_like_90() {
+        // rem_euclid(360): 450 -> 90, -90 -> 270. Both are the "swap w/h"
+        // family, so a 1x3 partition at either rotation occupies 3x1 —
+        // identical footprint to the canonical 90 case above.
+        let map = open_map(8, 8);
+        for rotation in [450, -90] {
+            let layout = vec![item(
+                crate::LayoutItemKind::Partition,
+                2,
+                2,
+                1,
+                3,
+                rotation,
+                false,
+            )];
+            let grid = CollisionGrid::from_map_and_layout(&map, &layout);
+            assert!(grid.is_blocked(2, 2), "rotation={rotation}");
+            assert!(grid.is_blocked(3, 2), "rotation={rotation}");
+            assert!(grid.is_blocked(4, 2), "rotation={rotation}");
+            assert!(
+                !grid.is_blocked(2, 3),
+                "rotation={rotation}: unrotated cell must stay free"
+            );
+            assert!(!grid.is_blocked(2, 4), "rotation={rotation}");
+        }
     }
 
     #[test]

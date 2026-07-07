@@ -32,6 +32,15 @@ use crate::{Agent, LayoutItem, WorkItem, World, WorldStatus};
 /// same-direction queue drain without churn.
 pub const REROUTE_AFTER_TICKS: u32 = 4;
 
+/// Consecutive wait-then-reroute cycles (each REROUTE_AFTER_TICKS ticks)
+/// without any positional progress before the agent is considered stuck
+/// and a loud `stuck_in_place` event is emitted. This does NOT change the
+/// wait/retry behavior itself — the agent keeps waiting and re-attempting
+/// A* every cycle exactly as before — it only makes a pathological case
+/// (e.g. permanently boxed in by furniture/other agents) observable
+/// instead of silently retrying forever off-screen.
+pub const STUCK_REROUTE_STREAK: u32 = 25;
+
 /// Agent statuses used by the Phase 1 commute script (P0 schema
 /// `current_status` semantics: seed default is `commuting`).
 pub const STATUS_COMMUTING: &str = "commuting";
@@ -49,6 +58,11 @@ pub struct AgentSim {
     pub path: VecDeque<(i32, i32)>,
     /// Consecutive ticks spent blocked by another agent.
     pub stall_ticks: u32,
+    /// Consecutive wait-then-reroute cycles whose A* re-run found no
+    /// path. Resets on a successful reroute or on any actual movement.
+    /// At every multiple of [`STUCK_REROUTE_STREAK`] a loud
+    /// `stuck_in_place` event is emitted (see `step()`).
+    pub reroute_fails: u32,
 }
 
 #[derive(Debug)]
@@ -85,6 +99,14 @@ impl WorldState {
         agents.sort_by(|a, b| a.name.cmp(&b.name));
         let schedule: Vec<CommuteEntry> = commute_schedule(&agents);
 
+        // Chair assignment must be one-to-one: two agents resolving to the
+        // same chair tile is a seed/DB configuration error (they would
+        // permanently fight over one seat, or one silently overwrites the
+        // other's target). Detect it loudly here rather than let it
+        // surface later as an inexplicable stuck-in-place agent.
+        let mut chair_owner: std::collections::HashMap<(i32, i32), String> =
+            std::collections::HashMap::new();
+
         let mut sims = Vec::with_capacity(agents.len());
         for agent in agents {
             let desk_id = agent
@@ -102,6 +124,14 @@ impl WorldState {
             if !chair.walkable {
                 return Err(format!("world: chair '{chair_key}' is not walkable"));
             }
+            let chair_pos = (chair.pos_x, chair.pos_y);
+            if let Some(prev_agent) = chair_owner.insert(chair_pos, agent.name.clone()) {
+                return Err(format!(
+                    "world: chair '{chair_key}' at {chair_pos:?} is assigned to both \
+                     '{prev_agent}' and '{}' — chair assignment must be one-to-one",
+                    agent.name
+                ));
+            }
             let spawn_sec = schedule
                 .iter()
                 .find(|e| e.agent_id == agent.id)
@@ -109,11 +139,12 @@ impl WorldState {
                 .expect("schedule covers every agent");
             sims.push(AgentSim {
                 agent,
-                chair: (chair.pos_x, chair.pos_y),
+                chair: chair_pos,
                 spawn_sec,
                 spawned: false,
                 path: VecDeque::new(),
                 stall_ticks: 0,
+                reroute_fails: 0,
             });
         }
 
@@ -211,6 +242,7 @@ impl WorldState {
             a.agent.current_status = STATUS_WALKING.into();
             a.path = path.into_iter().collect();
             a.stall_ticks = 0;
+            a.reroute_fails = 0;
             occupied.insert(door);
             events.push(SimEvent::AgentStatus {
                 agent_id: a.agent.id,
@@ -252,9 +284,27 @@ impl WorldState {
                     extra.remove(&from);
                     if let Some(p) = astar(&self.grid, &extra, from, chair) {
                         self.agents[i].path = p.into_iter().collect();
+                        self.agents[i].reroute_fails = 0;
+                    } else {
+                        // Keep the old path and wait (behavior unchanged:
+                        // the chair may be only momentarily unreachable
+                        // because of standing agents) — but count the
+                        // consecutive failures and get LOUD once the
+                        // streak says this is no longer momentary. The
+                        // event mirrors the stuck_unreachable pattern in
+                        // the spawn branch, except current_status stays
+                        // "walking" so the wait/retry loop keeps running.
+                        self.agents[i].reroute_fails += 1;
+                        if self.agents[i]
+                            .reroute_fails
+                            .is_multiple_of(STUCK_REROUTE_STREAK)
+                        {
+                            events.push(SimEvent::AgentStatus {
+                                agent_id: self.agents[i].agent.id,
+                                status: "stuck_in_place".into(),
+                            });
+                        }
                     }
-                    // On None (e.g. chair momentarily unreachable because
-                    // of standing agents) keep the old path and wait.
                     self.agents[i].stall_ticks = 0;
                 }
                 continue;
@@ -266,6 +316,7 @@ impl WorldState {
             occupied.insert(next);
             a.path.pop_front();
             a.stall_ticks = 0;
+            a.reroute_fails = 0;
             events.push(SimEvent::AgentMoved {
                 agent_id: a.agent.id,
                 x: next.0,
@@ -410,6 +461,216 @@ mod tests {
                 .iter()
                 .all(|a| !a.spawned && a.agent.current_status == STATUS_COMMUTING),
             "07:00 kickoff: everyone still commuting (spec T1.5)"
+        );
+    }
+
+    // ---- Minor #2 regression tests -------------------------------------
+
+    /// A tiny standalone tmj (ring of walls, one door) for tests that
+    /// build a `WorldState` from scratch instead of the real fixture.
+    fn tiny_tmj() -> String {
+        let (w, h) = (6, 6);
+        let mut walls = vec![0i64; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
+                    walls[y * w + x] = 2;
+                }
+            }
+        }
+        walls[(h - 1) * w + w / 2] = 0; // door, bottom center
+        serde_json::json!({
+            "width": w, "height": h,
+            "layers": [{"type": "tilelayer", "name": "walls", "data": walls}],
+            "tilesets": [{"firstgid": 1, "tiles": [
+                {"id": 1, "properties": [{"name": "collides", "type": "bool", "value": true}]}
+            ]}]
+        })
+        .to_string()
+    }
+
+    fn tiny_world() -> World {
+        World {
+            id: Uuid::nil(),
+            name: "t".into(),
+            seed: 1,
+            sim_day: 1,
+            sim_clock_sec: crate::clock::game_secs(7, 0),
+            tick_ms: 1000,
+            sec_per_tick: 10,
+            status: WorldStatus::Paused,
+        }
+    }
+
+    fn tiny_agent(name: &str, desk_id: Uuid) -> Agent {
+        Agent {
+            id: Uuid::new_v4(),
+            world_id: Uuid::nil(),
+            name: name.into(),
+            sprite_key: "agent_x".into(),
+            grade: "專員".into(),
+            title: "t".into(),
+            reports_to: None,
+            core_identity: "t".into(),
+            seed_traits: "t".into(),
+            current_status: STATUS_COMMUTING.into(),
+            pos_x: 0,
+            pos_y: 0,
+            desk_id: Some(desk_id),
+            llm_profile: serde_json::json!({}),
+        }
+    }
+
+    fn tiny_layout_item(
+        id: Uuid,
+        kind: crate::LayoutItemKind,
+        key: &str,
+        x: i32,
+        y: i32,
+        walkable: bool,
+    ) -> LayoutItem {
+        LayoutItem {
+            id,
+            world_id: Uuid::nil(),
+            kind,
+            key: key.into(),
+            name: key.into(),
+            pos_x: x,
+            pos_y: y,
+            w: 1,
+            h: 1,
+            rotation: 0,
+            zone: "common".into(),
+            walkable,
+            affords: vec![],
+            meta: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn from_parts_rejects_two_agents_on_the_same_chair() {
+        let desk_id = Uuid::new_v4();
+        let layout = vec![
+            tiny_layout_item(desk_id, crate::LayoutItemKind::Desk, "deskA", 2, 2, false),
+            tiny_layout_item(
+                Uuid::new_v4(),
+                crate::LayoutItemKind::Chair,
+                "deskA-chair",
+                2,
+                3,
+                true,
+            ),
+        ];
+        // Both agents point at the SAME desk_id, so both resolve to
+        // "deskA-chair" — a one-to-one assignment violation.
+        let agents = vec![tiny_agent("甲", desk_id), tiny_agent("乙", desk_id)];
+        let err = WorldState::from_parts(tiny_world(), agents, layout, vec![], &tiny_tmj())
+            .expect_err("duplicate chair assignment must be a loud error");
+        assert!(
+            err.contains("deskA-chair") && err.contains("one-to-one"),
+            "error should name the offending chair and explain the rule: {err}"
+        );
+    }
+
+    /// Reroute-failure streak: a walker whose chair's ONLY approach tile
+    /// is permanently occupied by a seated agent keeps failing the
+    /// wait-then-reroute A* re-run. After [`STUCK_REROUTE_STREAK`]
+    /// consecutive failures a loud `stuck_in_place` event must fire, and
+    /// the wait/retry behavior itself must be unchanged (the walker stays
+    /// "walking"; it is never demoted to stuck_unreachable).
+    ///
+    /// Map (6x6 ring, door at (3,5)); interior x,y in 1..=4:
+    ///   (1,1) = walker's chair; its neighbors are wall (0,1)/(1,0),
+    ///           desk (2,1) non-walkable, and (1,2) — the only approach.
+    ///   (1,2) = blocker's chair (walkable, but occupied once seated).
+    ///   (2,2) = blocker's desk (non-walkable).
+    #[test]
+    fn reroute_fail_streak_emits_loud_stuck_event_and_keeps_waiting() {
+        let walker_desk = Uuid::new_v4();
+        let blocker_desk = Uuid::new_v4();
+        let layout = vec![
+            tiny_layout_item(
+                walker_desk,
+                crate::LayoutItemKind::Desk,
+                "deskA",
+                2,
+                1,
+                false,
+            ),
+            tiny_layout_item(
+                Uuid::new_v4(),
+                crate::LayoutItemKind::Chair,
+                "deskA-chair",
+                1,
+                1,
+                true,
+            ),
+            tiny_layout_item(
+                blocker_desk,
+                crate::LayoutItemKind::Desk,
+                "deskB",
+                2,
+                2,
+                false,
+            ),
+            tiny_layout_item(
+                Uuid::new_v4(),
+                crate::LayoutItemKind::Chair,
+                "deskB-chair",
+                1,
+                2,
+                true,
+            ),
+        ];
+        // Sorted roster order: "blocker" < "walker".
+        let agents = vec![
+            tiny_agent("walker", walker_desk),
+            tiny_agent("blocker", blocker_desk),
+        ];
+        let mut ws = WorldState::from_parts(tiny_world(), agents, layout, vec![], &tiny_tmj())
+            .expect("valid two-agent world");
+        assert_eq!(ws.agents[0].agent.name, "blocker");
+        let walker_id = ws.agents[1].agent.id;
+        // Blocker spawns first and sits down on the choke tile (1,2);
+        // walker spawns after the blocker is guaranteed seated.
+        let clock = ws.world.sim_clock_sec;
+        ws.agents[0].spawn_sec = clock + 10;
+        ws.agents[1].spawn_sec = clock + 150;
+        ws.resume();
+
+        let mut stuck_events = 0u32;
+        // Enough ticks for: blocker seat (~6) + walker spawn (15) + walk
+        // (~6) + STUCK_REROUTE_STREAK failed cycles of REROUTE_AFTER_TICKS
+        // ticks each (100), with slack.
+        for _ in 0..220 {
+            for ev in ws.step() {
+                if let SimEvent::AgentStatus { agent_id, status } = ev {
+                    if status == "stuck_in_place" {
+                        assert_eq!(agent_id, walker_id, "only the walker can be stuck");
+                        stuck_events += 1;
+                    }
+                    assert_ne!(
+                        status, "stuck_unreachable",
+                        "a blocked-by-agent walker must keep waiting, not be marked unreachable"
+                    );
+                }
+            }
+        }
+        assert!(
+            stuck_events >= 1,
+            "expected a loud stuck_in_place event after {STUCK_REROUTE_STREAK} consecutive reroute failures"
+        );
+        assert_eq!(
+            ws.agents[0].agent.current_status, STATUS_SEATED,
+            "blocker sits normally"
+        );
+        assert_eq!(
+            ws.agents[1].agent.current_status, STATUS_WALKING,
+            "walker keeps waiting/retrying (behavior unchanged by the loud event)"
+        );
+        assert!(
+            ws.agents[1].reroute_fails >= STUCK_REROUTE_STREAK,
+            "streak counter reflects the sustained failure"
         );
     }
 }

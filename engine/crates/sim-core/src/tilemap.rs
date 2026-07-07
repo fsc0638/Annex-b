@@ -88,9 +88,21 @@ impl TileMap {
 
         let mut blocked = vec![false; (width * height) as usize];
         for (i, gid_v) in data.iter().enumerate() {
-            let gid = gid_v
+            let raw_gid = gid_v
                 .as_i64()
                 .ok_or_else(|| format!("tmj: non-integer gid at index {i}"))?;
+            // Tiled stores per-cell flip/rotate flags in the top 3 bits of
+            // the gid (horizontal/vertical/diagonal flip: bits 31/30/29 —
+            // see FLIPPED_*_FLAG in the Tiled JSON format). The office
+            // shell generator never emits flipped tiles today, but a
+            // hand-edited or future map might; masking them off before
+            // the collides lookup keeps collision detection correct
+            // either way. `loud` here means: we don't silently ignore the
+            // flag, we explicitly strip it and rely on collides_gids
+            // matching by the unflipped id — if that expectation ever
+            // needs the flip bits themselves (e.g. to mirror a sprite),
+            // this is the place to plumb them through.
+            let gid = raw_gid & 0x1FFF_FFFF;
             if gid != 0 && collides_gids.contains(&gid) {
                 blocked[i] = true;
             }
@@ -171,6 +183,45 @@ mod tests {
         let map = TileMap::from_tmj_str(&tiny_tmj()).unwrap();
         assert_eq!((map.width, map.height), (4, 3));
         assert!(map.is_blocked(0, 0));
+        assert!(map.is_blocked(3, 2));
+        assert!(!map.is_blocked(1, 1));
+        assert_eq!(map.door_tiles, vec![(2, 2)]);
+    }
+
+    #[test]
+    fn flipped_wall_gid_still_collides() {
+        // Same ring-with-door layout as tiny_tmj(), but every wall gid has
+        // Tiled's horizontal+vertical flip flags (bits 31/30) set on top
+        // of the real gid 2. Collision must be judged on the masked gid.
+        const FLIPPED_H: i64 = 1 << 31;
+        const FLIPPED_V: i64 = 1 << 30;
+        let w = 4;
+        let h = 3;
+        let mut walls = vec![0i64; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
+                    walls[y * w + x] = 2 | FLIPPED_H | FLIPPED_V;
+                }
+            }
+        }
+        walls[2 * w + 2] = 0; // door, unflagged
+        let tmj = serde_json::json!({
+            "width": w, "height": h,
+            "layers": [
+                {"type": "tilelayer", "name": "floor", "data": vec![1i64; w*h]},
+                {"type": "tilelayer", "name": "walls", "data": walls},
+            ],
+            "tilesets": [{
+                "firstgid": 1,
+                "tiles": [
+                    {"id": 1, "properties": [{"name": "collides", "type": "bool", "value": true}]}
+                ]
+            }]
+        })
+        .to_string();
+        let map = TileMap::from_tmj_str(&tmj).unwrap();
+        assert!(map.is_blocked(0, 0), "flipped wall gid must still collide");
         assert!(map.is_blocked(3, 2));
         assert!(!map.is_blocked(1, 1));
         assert_eq!(map.door_tiles, vec![(2, 2)]);
