@@ -79,12 +79,38 @@ async fn send_json(ws: &mut WsStream, v: serde_json::Value) {
     ws.send(Message::Text(v.to_string())).await.expect("send");
 }
 
+/// Reads the next TEXT frame (skipping only protocol frames like
+/// ping/pong, never text) so ordering assertions are real — unlike
+/// `wait_for`, which scans PAST non-matching text messages.
+async fn next_text_frame(ws: &mut WsStream) -> serde_json::Value {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    return serde_json::from_str::<serde_json::Value>(&text).expect("valid JSON");
+                }
+                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
+                other => panic!("expected a text frame, got: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for a text frame")
+}
+
 #[tokio::test]
 async fn first_message_is_world_snapshot_with_full_shape() {
     let (url, _handle) = spawn_test_server().await;
     let mut ws = connect(&url).await;
 
-    let snap = wait_for(&mut ws, |v| v["type"] == "world_snapshot").await;
+    // The FIRST text frame must be the snapshot — asserted on the first
+    // frame directly (spec 7.4 "world_snapshot immediately on connect"),
+    // not via a scan that would tolerate other messages sneaking ahead.
+    let snap = next_text_frame(&mut ws).await;
+    assert_eq!(
+        snap["type"], "world_snapshot",
+        "the very first text frame must be world_snapshot, got: {snap}"
+    );
     assert_eq!(snap["world"]["sim_clock_sec"], 25200, "07:00 kickoff");
     assert_eq!(snap["world"]["speed"], 1);
     assert_eq!(snap["world"]["status"], "paused");
@@ -121,6 +147,54 @@ async fn resume_starts_ticks_pause_broadcasts_world_paused() {
     )
     .await;
     wait_for(&mut ws_b, |v| v["type"] == "world_paused").await;
+}
+
+/// Ordering regression (P1 review minor #4): `world_paused` is sent
+/// while holding the world lock — the same serialization point as the
+/// tick loop's sends — so no tick stepped before the pause can be
+/// enqueued AFTER world_paused. Client impact: a `tick` sets
+/// running=true in the store, so a late tick after world_paused would
+/// flip every client back to "running" while the world is frozen.
+#[tokio::test]
+async fn no_tick_arrives_after_world_paused() {
+    let (url, _handle) = spawn_test_server().await;
+    let mut ws = connect(&url).await;
+    wait_for(&mut ws, |v| v["type"] == "world_snapshot").await;
+
+    send_json(
+        &mut ws,
+        serde_json::json!({"type": "control", "action": "resume"}),
+    )
+    .await;
+    wait_for(&mut ws, |v| v["type"] == "tick").await;
+    send_json(
+        &mut ws,
+        serde_json::json!({"type": "control", "action": "pause"}),
+    )
+    .await;
+    wait_for(&mut ws, |v| v["type"] == "world_paused").await;
+
+    // 15+ tick intervals of post-pause silence (tick_ms = 20): nothing
+    // may follow world_paused — in particular no tick.
+    let late_tick = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    let v: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+                    if v["type"] == "tick" {
+                        return v;
+                    }
+                }
+                Some(Ok(_)) => continue,
+                other => panic!("ws closed during the post-pause window: {other:?}"),
+            }
+        }
+    })
+    .await;
+    assert!(
+        late_tick.is_err(),
+        "no tick may arrive after world_paused, got: {late_tick:?}"
+    );
 }
 
 #[tokio::test]

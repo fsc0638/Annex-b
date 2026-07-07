@@ -93,6 +93,14 @@ pub async fn load_world_state(pool: Option<&PgPool>) -> Result<WorldState, Strin
 /// advance one tick and broadcast its events. Re-reads tick_ms/speed each
 /// iteration so `set_speed` takes effect from the next tick. Runs forever
 /// (paused worlds still tick the timer but `step()` no-ops cheaply).
+///
+/// Ordering guarantee: events are sent on the broadcast channel WHILE the
+/// world lock is still held. Every other broadcaster (ws.rs sends
+/// `world_paused` under the same lock) is therefore serialized against
+/// tick events by the lock itself — a `world_paused` on the channel can
+/// never overtake, nor be overtaken by, the tick events of a step on the
+/// other side of the pause. (broadcast::Sender::send is sync and
+/// non-blocking, so sending under the lock costs nothing.)
 pub fn spawn_tick_loop(handle: Arc<SimHandle>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -102,19 +110,19 @@ pub fn spawn_tick_loop(handle: Arc<SimHandle>) -> tokio::task::JoinHandle<()> {
             };
             tokio::time::sleep(std::time::Duration::from_millis(interval)).await;
 
-            let events = {
+            {
                 let mut world = handle.world.lock().await;
-                world.step()
-            };
-            for event in events {
-                match serde_json::to_string(&event) {
-                    Ok(json) => {
-                        // send() only fails when there are no subscribers —
-                        // that's fine (nobody watching), not an error.
-                        let _ = handle.events.send(json);
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to serialize sim event");
+                for event in world.step() {
+                    match serde_json::to_string(&event) {
+                        Ok(json) => {
+                            // send() only fails when there are no
+                            // subscribers — that's fine (nobody watching),
+                            // not an error.
+                            let _ = handle.events.send(json);
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to serialize sim event");
+                        }
                     }
                 }
             }

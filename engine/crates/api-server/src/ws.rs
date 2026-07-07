@@ -113,15 +113,24 @@ async fn handle_control(
 ) -> Result<(), ()> {
     match msg.get("action").and_then(|a| a.as_str()) {
         Some("pause") => {
+            // Spec 7.4 world_paused: broadcast so every client freezes
+            // together (resume is observable via ticks starting again).
+            //
+            // The broadcast is sent WHILE the world lock is held — the
+            // tick loop (sim.rs) also sends its events under this lock,
+            // so the channel order is fully serialized by the lock:
+            // world_paused always lands after every tick that preceded
+            // the pause, and no tick can slip in between pause() and
+            // this send. (Previously the send happened after unlocking,
+            // so an already-stepped tick could be enqueued AFTER
+            // world_paused, making clients flip back to running.)
             {
                 let mut world = sim.world.lock().await;
                 world.pause();
+                let _ = sim
+                    .events
+                    .send(json!({ "type": "world_paused" }).to_string());
             }
-            // Spec 7.4 world_paused: broadcast so every client freezes
-            // together (resume is observable via ticks starting again).
-            let _ = sim
-                .events
-                .send(json!({ "type": "world_paused" }).to_string());
             Ok(())
         }
         Some("resume") => {
