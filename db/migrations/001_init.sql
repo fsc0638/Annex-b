@@ -161,3 +161,22 @@ create table llm_calls (
   latency_ms  int, ok boolean not null,
   created_at  timestamptz not null default now()
 );
+
+-- Major #3 fix (docs/eval/p0-review.md): agents.desk_id had no FK to
+-- layout_items(id) — nothing prevented it from pointing at a nonexistent
+-- row or a row of the wrong kind. Declared here via alter table (not
+-- inline on the `agents` column above) because layout_items is defined
+-- *after* agents in this file and Postgres requires the referenced table
+-- to exist first; `on delete set null` means a deleted seat automatically
+-- un-assigns its occupant rather than leaving a dangling id, matching the
+-- spec 7.3 "重複指派時前者變未指派" un-assignment spirit for the deletion
+-- case. Note: this constraint only enforces that desk_id points at *some*
+-- real layout_items row — it does NOT enforce that the referenced
+-- layout_items row belongs to the same world_id as the agent (Postgres
+-- has no native cross-row-same-table-different-column FK for that
+-- without a trigger); same-world consistency between an agent and its
+-- assigned desk is maintained by the application layer (the layout
+-- editor, spec 7.3) rather than the DB schema.
+alter table agents
+  add constraint agents_desk_id_fkey
+  foreign key (desk_id) references layout_items(id) on delete set null;
