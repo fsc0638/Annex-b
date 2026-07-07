@@ -33,9 +33,24 @@ impl PricingTable {
     }
 
     /// Looks up a price by `"provider:model"` key (matches the pricing.toml
-    /// key convention and the llm_profile override format).
+    /// key convention and the llm_profile override format). A miss still
+    /// returns `None` (callers, per `calculate_cost_usd`, account $0 cost
+    /// for it — deliberately unchanged fail-toward-default behavior), but
+    /// logs a warning naming the missed key so a misconfigured
+    /// `llm_profile` override pointing at an unpriced model doesn't
+    /// silently undercount spend against `DAILY_BUDGET_USD` with zero
+    /// operator-visible signal (Minor #4 fix).
     pub fn get(&self, provider: &str, model: &str) -> Option<&ModelPrice> {
-        self.models.get(&format!("{provider}:{model}"))
+        let key = format!("{provider}:{model}");
+        let price = self.models.get(&key);
+        if price.is_none() {
+            tracing::warn!(
+                provider,
+                model,
+                "no pricing.toml entry for this provider:model — accounting $0 cost for this call"
+            );
+        }
+        price
     }
 }
 
@@ -110,5 +125,27 @@ output_per_million = 0.6
         assert_eq!(price.input_per_million, 1.0);
         let missing = table.get("anthropic", "does-not-exist");
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn get_on_unpriced_model_still_returns_none_and_composes_to_zero_cost() {
+        // Minor #4 fix: a miss now also emits a tracing::warn (not
+        // asserted here — no subscriber wired in this unit test — but the
+        // $0-cost behavior itself must be unchanged end-to-end: a
+        // misconfigured llm_profile override pointing at an unpriced
+        // model still accounts $0, it's just no longer silent to an
+        // operator watching logs).
+        let table = PricingTable::load_from_str(
+            r#"
+["openai:gpt-4.1-mini"]
+input_per_million = 0.4
+output_per_million = 1.6
+"#,
+        )
+        .unwrap();
+        let price = table.get("openai:gpt-4.1-mini-override", "unpriced-model");
+        assert!(price.is_none());
+        let cost = calculate_cost_usd(price, Some(1_000_000), Some(1_000_000));
+        assert_eq!(cost, 0.0);
     }
 }
