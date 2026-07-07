@@ -1,13 +1,34 @@
 //! sim-core: world state, tick loop, A*, layout collision rebuild, event bus.
 //!
-//! Phase 0 scope: domain types mirroring `db/migrations/001_init.sql` so that
-//! later crates (agent-core, api-server) can share a single source of truth
-//! for shapes. Tick loop, A* pathfinding, and layout collision rebuild are
-//! Phase 1+ work (see spec section 8) and are intentionally NOT implemented
-//! here yet.
+//! Phase 0 established the domain types mirroring `db/migrations/001_init.sql`
+//! (kept below in this file). Phase 1 adds the office-world simulation:
+//!
+//! - [`tilemap`]: parses the Tiled `.tmj` shell map (walls carry a custom
+//!   `collides=true` property; door tiles are the walkable gaps in the ring).
+//! - [`grid`]: collision grid = tmj walls ⊕ non-walkable layout footprints
+//!   (rotation-aware).
+//! - [`pathfind`]: deterministic 4-directional A* with Manhattan heuristic.
+//! - [`clock`]: game-time helpers and the wall-clock tick interval rule.
+//! - [`commute`]: Appendix A.2 commute schedule (Phase 1 world script).
+//! - [`world`]: [`world::WorldState`] — in-memory world + `step()` tick.
+//! - [`events`]: [`events::SimEvent`] broadcast payloads (spec 7.4 subset).
+//! - [`fixture`]: DB-less loading from the world fixture JSON + tmj.
+//! - [`db`] (feature `db`): sqlx **runtime-query** loading path (repo rule:
+//!   never `query!` compile-time macros — no DB at build time).
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+pub mod clock;
+pub mod commute;
+#[cfg(feature = "db")]
+pub mod db;
+pub mod events;
+pub mod fixture;
+pub mod grid;
+pub mod pathfind;
+pub mod tilemap;
+pub mod world;
 
 /// Mirrors the `worlds` table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +51,27 @@ pub enum WorldStatus {
     Running,
     Editing,
     Archived,
+}
+
+impl WorldStatus {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            WorldStatus::Paused => "paused",
+            WorldStatus::Running => "running",
+            WorldStatus::Editing => "editing",
+            WorldStatus::Archived => "archived",
+        }
+    }
+
+    pub fn from_db_str(s: &str) -> Option<Self> {
+        match s {
+            "paused" => Some(WorldStatus::Paused),
+            "running" => Some(WorldStatus::Running),
+            "editing" => Some(WorldStatus::Editing),
+            "archived" => Some(WorldStatus::Archived),
+            _ => None,
+        }
+    }
 }
 
 /// Mirrors the `agents` table.
@@ -100,6 +142,22 @@ impl LayoutItemKind {
             LayoutItemKind::Plant => "plant",
             LayoutItemKind::PantryCounter => "pantry_counter",
             LayoutItemKind::Whiteboard => "whiteboard",
+        }
+    }
+
+    pub fn from_db_str(s: &str) -> Option<Self> {
+        match s {
+            "desk" => Some(LayoutItemKind::Desk),
+            "exec_desk" => Some(LayoutItemKind::ExecDesk),
+            "chair" => Some(LayoutItemKind::Chair),
+            "partition" => Some(LayoutItemKind::Partition),
+            "meeting_table" => Some(LayoutItemKind::MeetingTable),
+            "cabinet" => Some(LayoutItemKind::Cabinet),
+            "printer" => Some(LayoutItemKind::Printer),
+            "plant" => Some(LayoutItemKind::Plant),
+            "pantry_counter" => Some(LayoutItemKind::PantryCounter),
+            "whiteboard" => Some(LayoutItemKind::Whiteboard),
+            _ => None,
         }
     }
 }

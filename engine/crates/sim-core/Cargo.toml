@@ -4,8 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# The DB loading path (db.rs) is feature-gated so sim-core's default build
+# stays a pure, I/O-light crate (the P0-review-endorsed shape): fixture
+# loading + world simulation need no sqlx/tokio. api-server enables `db`.
+db = ["dep:sqlx"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+sqlx = { workspace = true, optional = true }
