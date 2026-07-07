@@ -8,7 +8,8 @@
 Phase 1（辦公室世界與渲染，T1.1–T1.5）已實作完成，於分支
 `phase/1-world`（基於 P0 驗收後修復批次的 `phase/0-bootstrap` tip）。
 9 名 agent 依附錄 A.2 於 07:00–09:00 從大門進場走到自己座位坐下；
-前端 PixiJS 即時渲染＋時間控制；workspace 測試 119 個全綠（P0 基準 70）。
+前端 PixiJS 即時渲染＋時間控制；workspace 測試 124 個全綠（P0 基準 70；
+P1 驗收時 119，驗收後修復批次 +5，見下方 2026-07-08 段）。
 Phase 0（環境與骨架）見 `phase/0-bootstrap`。
 
 ## 重大決策
@@ -121,6 +122,49 @@ P0 對抗驗收（`docs/eval/p0-review.md`，0 blocker／6 major／4 minor）後
 - **世界開機為 paused**：與 seed 的 `status='paused'` 一致，按 UI 播放
   鍵才開始跑；`WORLD_SOURCE=db|fixture` 決定世界來源（fixture＝本機
   無 DB 的 demo 模式，`FIXTURE_PATH`/`TMJ_PATH` 可覆寫路徑）。
+
+## 2026-07-08 P1 驗收後修復
+
+P1 多維度對抗驗收（1 major／12 minor）後、合併 main 前的修復批次，
+逐項對應驗收清單編號（測試 119 → 124）：
+
+- **Major — `OfficeCanvas.ensureVisual` check-then-await 競態**：visuals
+  map 改存「await 之前同步登記的 in-flight `Promise<AgentVisual>`」，
+  並發的 syncAgents 一律 await 同一個 promise，重複 addChild 在結構上
+  不可能（修掉重整頁面時的凍結鬼影 sprite）；另設 resolved 鏡像 map 供
+  同步的 per-frame ticker 讀取，清理迴圈仍以 promise map 為唯一事實源。
+- **#1 — tilemap flip flags**：gid 比對前 `& 0x1FFF_FFFF` 剝除 Tiled
+  翻轉旗標（bit 31/30/29），帶旗標的牆仍判 collides；測試
+  `flipped_wall_gid_still_collides`。
+- **#2 — chair 唯一性＋stuck 事件**：`from_parts` 驗證 chair 指派
+  一對一（重複→loud error）；wait-then-reroute 連續 25 次
+  （`STUCK_REROUTE_STREAK`）重尋路失敗發 loud `stuck_in_place` 事件，
+  等待/重試行為本身不變；測試各一。
+- **#3 — rotation 正規化**：`grid::footprint` 與 web `footprintOf` 都以
+  `rem_euclid(360)` 語意正規化後才比對 90/270（450≡-90≡90，兩側不脫鉤）；
+  測試 `rotation_450_and_negative_90_normalize_like_90`。
+- **#4 — world_paused 順序**：pause handler 與 tick loop 都改為**持
+  world lock 期間**送 broadcast，channel 順序由鎖完全序列化（world_paused
+  永遠在其之前的 tick 之後）；測試 `no_tick_arrives_after_world_paused`。
+- **#5 — 家具層 GPU 堆積**：`drawFurniture` 改為單一常駐 Graphics 用
+  `clear()` 重畫，不再每次 snapshot removeChildren＋new Graphics。
+- **#6 — mock 模式空辦公室**：`NEXT_PUBLIC_MOCK_SNAPSHOT=1` 時 commuting
+  agent 以半透明（alpha 0.5）顯示——**此為 mock 專屬行為**（mock 快照
+  是 07:00 靜態開局、9 人全 commuting，全隱藏會渲染出空辦公室）；
+  live ws 模式維持隱藏。
+- **#7 — 步行動畫速率**：隨 store speed 縮放（0.12×speed，封頂 0.6）；
+  `gen_agent_sprites.mjs` 檔頭註解改為描述真實的 0→1→2 迴圈
+  （PixiJS AnimatedSprite 預設 loop），移除虛構的 ping-pong 說法。
+- **#8 — assets/README 措辭**：改為「除自產（gen_*.mjs 產生、已登記
+  CREDITS.md）之白名單檔案外，第三方素材圖檔不會加入版控」。
+- **#9 — exec VP golden**：`astar_golden_door_to_exec_vp_chair` 釘死
+  整條 48 步路徑向量（比照 deskA-01 golden）。
+- **#10 — ws 首則訊息**：`first_message_is_world_snapshot_with_full_shape`
+  直接斷言**第一個 Text frame** 是 world_snapshot，不再用 wait_for 掃描。
+- **#11 — 通勤 spawn 位置**：commute_headless 補斷言每個 agent 第一個
+  `agent_moved` 的座標 ∈ 地圖 door_tiles（原本只驗時間）。
+- **#12 — ci.sh 冪等段**：`git diff --exit-code` 之外同路徑再查
+  `git status --porcelain`，產生器產出新的 untracked 檔也會 FAIL。
 
 ## 已知缺口（Known Gaps）
 
