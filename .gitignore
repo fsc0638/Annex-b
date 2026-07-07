@@ -24,3 +24,11 @@ out/
 .vscode/
 .idea/
 *.swp
+
+# Paid/third-party art assets (spec section 9: repo must not contain
+# LimeZu's paid tileset originals). README.md and CREDITS.md in these
+# directories are intentionally NOT ignored (see the negations below).
+assets/tilesets/*
+!assets/tilesets/.gitkeep
+assets/sprites/agents/*
+!assets/sprites/agents/.gitkeep
