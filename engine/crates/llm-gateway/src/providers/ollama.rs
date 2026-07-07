@@ -51,7 +51,11 @@ impl ChatProvider for OllamaProvider {
         !self.base_url.is_empty()
     }
 
-    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, ProviderError> {
+    async fn chat(
+        &self,
+        req: ChatRequest,
+        timeout: std::time::Duration,
+    ) -> Result<ChatResponse, ProviderError> {
         if !self.is_enabled() {
             return Err(ProviderError::Disabled("ollama".to_string()));
         }
@@ -83,7 +87,7 @@ impl ChatProvider for OllamaProvider {
             .client
             .post(&url)
             .json(&body)
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(timeout)
             .send()
             .await?;
         let status = resp.status();
@@ -122,7 +126,11 @@ impl ChatProvider for OllamaProvider {
 
 #[async_trait]
 impl EmbeddingProvider for OllamaProvider {
-    async fn embed(&self, req: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError> {
+    async fn embed(
+        &self,
+        req: EmbeddingRequest,
+        timeout: std::time::Duration,
+    ) -> Result<EmbeddingResponse, ProviderError> {
         if !self.is_enabled() {
             return Err(ProviderError::Disabled("ollama".to_string()));
         }
@@ -135,7 +143,7 @@ impl EmbeddingProvider for OllamaProvider {
             .client
             .post(&url)
             .json(&body)
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(timeout)
             .send()
             .await?;
         let status = resp.status();

@@ -39,8 +39,11 @@ async fn healthz_returns_200_without_db_or_ollama() {
 
     assert_eq!(json["status"], "ok");
     assert_eq!(json["db"]["reachable"], false);
-    // providers array must list all 4 non-mock providers regardless of
-    // whether keys are configured for this test run.
+    // `providers` lists exactly the 3 cloud providers (spec 6.1 language
+    // is specific to cloud providers' API-key presence); `ollama` has its
+    // own top-level `ollama` field instead (asserted below) rather than a
+    // duplicate, differently-shaped entry in `providers` (Major #4 fix —
+    // see llm_gateway::Gateway::provider_statuses's doc comment).
     let providers = json["providers"].as_array().unwrap();
     let names: Vec<&str> = providers
         .iter()
@@ -49,5 +52,9 @@ async fn healthz_returns_200_without_db_or_ollama() {
     assert!(names.contains(&"anthropic"));
     assert!(names.contains(&"openai"));
     assert!(names.contains(&"gemini"));
-    assert!(names.contains(&"ollama"));
+    assert!(!names.contains(&"ollama"));
+    assert_eq!(providers.len(), 3);
+    // ollama's reachability is reported via its own top-level field, not
+    // duplicated inside `providers`.
+    assert_eq!(json["ollama"]["reachable"], false);
 }

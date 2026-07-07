@@ -11,6 +11,11 @@ pub struct HealthzResponse {
     pub status: String,
     pub db: ComponentHealth,
     pub ollama: ComponentHealth,
+    /// The 3 cloud providers only (anthropic/openai/gemini) — `ollama`'s
+    /// reachability lives in the `ollama` field above instead of being
+    /// duplicated here under a differently-scoped `enabled` meaning; see
+    /// `llm_gateway::Gateway::provider_statuses`'s doc comment for why
+    /// `ollama` and `mock` are excluded from this array.
     pub providers: Vec<llm_gateway::ProviderStatus>,
 }
 

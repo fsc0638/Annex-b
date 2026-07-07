@@ -3,9 +3,17 @@
 //! override L1-L3 per agent with a `"provider:model"` string. L0
 //! (embedding/importance) is never overridable — pinned to local Ollama to
 //! keep cost and vector space consistent (spec 6.1 v2.1 note).
+//!
+//! Timeout and retry-count are tier-level properties per the spec 6.1
+//! table (L0=15s/2, L1=30s/2, L2=60s/2, L3=90s/1) and travel with the
+//! resolved `TierTarget` regardless of whether `agents.llm_profile`
+//! overrode the provider/model — an override only swaps
+//! provider:model, never the tier's operational policy (spec 6.1: "覆寫只
+//! 換供應商/型號，逾時、重試...規則不變").
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::provider::ProviderId;
 
@@ -33,18 +41,47 @@ impl Tier {
     pub fn is_overridable(&self) -> bool {
         !matches!(self, Tier::L0)
     }
+
+    /// Tier-level timeout per spec 6.1's table. Fixed by tier, never by
+    /// `llm_profile` override.
+    pub fn timeout(&self) -> Duration {
+        match self {
+            Tier::L0 => Duration::from_secs(15),
+            Tier::L1 => Duration::from_secs(30),
+            Tier::L2 => Duration::from_secs(60),
+            Tier::L3 => Duration::from_secs(90),
+        }
+    }
+
+    /// Tier-level max retry count per spec 6.1's table. This is the number
+    /// of *retries* after an initial attempt (e.g. L2's `2` means up to 3
+    /// total attempts), matching the spec table's "重試" column, which is
+    /// explicitly a retry count, not a total-attempts count.
+    pub fn max_retries(&self) -> u32 {
+        match self {
+            Tier::L0 => 2,
+            Tier::L1 => 2,
+            Tier::L2 => 2,
+            Tier::L3 => 1,
+        }
+    }
 }
 
-/// A resolved (provider, model) pair for a tier.
+/// A resolved (provider, model) pair for a tier, plus the tier's timeout
+/// and retry policy (spec 6.1) so callers never have to re-derive it from
+/// the `Tier` separately after resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TierTarget {
     pub provider: ProviderId,
     pub model: String,
+    pub timeout: Duration,
+    pub max_retries: u32,
 }
 
 /// The tier -> default target table, built from env model IDs. Timeout and
-/// retry policy live alongside the table per spec 6.1 but are not enforced
-/// by this pure struct — callers (the async gateway) apply them.
+/// retry-count are derived purely from `Tier` (spec 6.1's fixed table, see
+/// `Tier::timeout`/`Tier::max_retries`) and attached to every `TierTarget`
+/// this struct produces, so they always travel with tier resolution.
 #[derive(Debug, Clone)]
 pub struct TierDefaults {
     defaults: HashMap<Tier, TierTarget>,
@@ -68,6 +105,8 @@ impl TierDefaults {
             TierTarget {
                 provider,
                 model: model.into(),
+                timeout: tier.timeout(),
+                max_retries: tier.max_retries(),
             },
         );
         self
@@ -127,7 +166,7 @@ pub fn resolve_tier_target(
 ) -> Option<TierTarget> {
     if tier.is_overridable() {
         if let Some(override_str) = llm_profile.get(tier.as_str()).and_then(|v| v.as_str()) {
-            if let Some(target) = parse_override(override_str) {
+            if let Some(target) = parse_override(tier, override_str) {
                 return Some(target);
             }
             tracing::warn!(
@@ -142,8 +181,11 @@ pub fn resolve_tier_target(
 
 /// Parses a `"provider:model"` override string. Returns `None` on
 /// malformed input (no colon, or unknown provider prefix) rather than
-/// erroring, so callers can decide fallback behavior.
-fn parse_override(s: &str) -> Option<TierTarget> {
+/// erroring, so callers can decide fallback behavior. `timeout`/
+/// `max_retries` on the returned target always come from `tier` itself
+/// (spec 6.1: an override only swaps provider:model, never the tier's
+/// timeout/retry policy) — never from anything override-string-derived.
+fn parse_override(tier: Tier, s: &str) -> Option<TierTarget> {
     let (provider_str, model) = s.split_once(':')?;
     let provider = ProviderId::parse(provider_str)?;
     if model.is_empty() {
@@ -152,6 +194,8 @@ fn parse_override(s: &str) -> Option<TierTarget> {
     Some(TierTarget {
         provider,
         model: model.to_string(),
+        timeout: tier.timeout(),
+        max_retries: tier.max_retries(),
     })
 }
 
@@ -235,8 +279,59 @@ mod tests {
         // Some model ids don't have colons, but be defensive: split_once
         // splits on the FIRST colon only, so "ollama:qwen2.5:7b-instruct"
         // should parse as provider=ollama, model="qwen2.5:7b-instruct".
-        let target = parse_override("ollama:qwen2.5:7b-instruct").unwrap();
+        let target = parse_override(Tier::L1, "ollama:qwen2.5:7b-instruct").unwrap();
         assert_eq!(target.provider, ProviderId::Ollama);
         assert_eq!(target.model, "qwen2.5:7b-instruct");
+    }
+
+    // --- spec 6.1 timeout/retry table -------------------------------
+
+    #[test]
+    fn l0_timeout_and_retries_match_spec_table() {
+        assert_eq!(Tier::L0.timeout(), Duration::from_secs(15));
+        assert_eq!(Tier::L0.max_retries(), 2);
+    }
+
+    #[test]
+    fn l1_timeout_and_retries_match_spec_table() {
+        assert_eq!(Tier::L1.timeout(), Duration::from_secs(30));
+        assert_eq!(Tier::L1.max_retries(), 2);
+    }
+
+    #[test]
+    fn l2_timeout_and_retries_match_spec_table() {
+        assert_eq!(Tier::L2.timeout(), Duration::from_secs(60));
+        assert_eq!(Tier::L2.max_retries(), 2);
+    }
+
+    #[test]
+    fn l3_timeout_and_retries_match_spec_table() {
+        assert_eq!(Tier::L3.timeout(), Duration::from_secs(90));
+        assert_eq!(Tier::L3.max_retries(), 1);
+    }
+
+    #[test]
+    fn resolved_default_target_carries_tier_timeout_and_retries() {
+        let defaults = sample_defaults();
+        let empty = json!({});
+        let l2 = resolve_tier_target(Tier::L2, &defaults, &empty).unwrap();
+        assert_eq!(l2.timeout, Duration::from_secs(60));
+        assert_eq!(l2.max_retries, 2);
+        let l3 = resolve_tier_target(Tier::L3, &defaults, &empty).unwrap();
+        assert_eq!(l3.timeout, Duration::from_secs(90));
+        assert_eq!(l3.max_retries, 1);
+    }
+
+    #[test]
+    fn llm_profile_override_keeps_tier_timeout_and_retries_unchanged() {
+        // Spec 6.1: "覆寫只換供應商/型號，逾時、重試...規則不變" — an
+        // override to a different provider/model on L2 must still carry
+        // L2's own timeout/retry policy, not some override-derived value.
+        let defaults = sample_defaults();
+        let profile = json!({"L2": "openai:gpt-4o-mini"});
+        let target = resolve_tier_target(Tier::L2, &defaults, &profile).unwrap();
+        assert_eq!(target.provider, ProviderId::Openai);
+        assert_eq!(target.timeout, Duration::from_secs(60));
+        assert_eq!(target.max_retries, 2);
     }
 }

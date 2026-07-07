@@ -33,7 +33,11 @@ impl ChatProvider for OpenAiProvider {
         self.api_key.is_some()
     }
 
-    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, ProviderError> {
+    async fn chat(
+        &self,
+        req: ChatRequest,
+        timeout: std::time::Duration,
+    ) -> Result<ChatResponse, ProviderError> {
         let api_key = self
             .api_key
             .as_ref()
@@ -66,7 +70,7 @@ impl ChatProvider for OpenAiProvider {
             .post(API_URL)
             .bearer_auth(api_key)
             .json(&body)
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(timeout)
             .send()
             .await?;
 

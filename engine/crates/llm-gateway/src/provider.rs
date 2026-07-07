@@ -106,12 +106,28 @@ pub trait ChatProvider: Send + Sync {
     /// routing and reflect it in `GET /healthz`.
     fn is_enabled(&self) -> bool;
 
-    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, ProviderError>;
+    /// `timeout` is the per-request timeout the caller wants applied to
+    /// this call. Per spec 6.1, timeout is a tier-level property resolved
+    /// by the gateway (`tier::TierTarget::timeout`) and passed in here
+    /// rather than hardcoded per-provider, so the same provider behaves
+    /// correctly under whichever tier routed the call to it. A short
+    /// connect-level timeout may still live inside the provider's HTTP
+    /// client construction — this parameter governs the request timeout.
+    async fn chat(
+        &self,
+        req: ChatRequest,
+        timeout: std::time::Duration,
+    ) -> Result<ChatResponse, ProviderError>;
 }
 
 /// Embeddings are only offered by Ollama in this system (L0 is pinned to
-/// local inference — see module docs).
+/// local inference — see module docs). `timeout` follows the same
+/// tier-supplied convention as `ChatProvider::chat` (L0 = 15s per spec 6.1).
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
-    async fn embed(&self, req: EmbeddingRequest) -> Result<EmbeddingResponse, ProviderError>;
+    async fn embed(
+        &self,
+        req: EmbeddingRequest,
+        timeout: std::time::Duration,
+    ) -> Result<EmbeddingResponse, ProviderError>;
 }

@@ -35,7 +35,11 @@ impl ChatProvider for AnthropicProvider {
         self.api_key.is_some()
     }
 
-    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, ProviderError> {
+    async fn chat(
+        &self,
+        req: ChatRequest,
+        timeout: std::time::Duration,
+    ) -> Result<ChatResponse, ProviderError> {
         let api_key = self
             .api_key
             .as_ref()
@@ -75,7 +79,7 @@ impl ChatProvider for AnthropicProvider {
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
             .json(&body)
-            .timeout(std::time::Duration::from_secs(90))
+            .timeout(timeout)
             .send()
             .await?;
 
