@@ -158,20 +158,32 @@ fi
 # ---------------------------------------------------------------------
 section "asset generators: regenerate and diff (idempotency)"
 if command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  GEN_PATHS=(
+    assets/maps assets/tilesets assets/sprites/agents
+    web/public/maps web/public/tilesets web/public/sprites web/public/mock
+    engine/crates/sim-core/tests/fixtures
+  )
   GEN_OK=1
   (cd "${REPO_ROOT}" && node scripts/gen_office_shell.mjs) || GEN_OK=0
   (cd "${REPO_ROOT}" && node scripts/gen_world_fixture.mjs) || GEN_OK=0
   (cd "${REPO_ROOT}" && node scripts/gen_agent_sprites.mjs) || GEN_OK=0
-  if [ "$GEN_OK" -eq 1 ] && (cd "${REPO_ROOT}" && git diff --exit-code -- \
-      assets/maps assets/tilesets assets/sprites/agents \
-      web/public/maps web/public/tilesets web/public/sprites web/public/mock \
-      engine/crates/sim-core/tests/fixtures); then
-    record "generators idempotent (git diff clean)" PASS
+  # `git diff --exit-code` only sees changes to TRACKED files; a generator
+  # that starts emitting a brand-new file would slip through as untracked.
+  # `git status --porcelain` over the same paths catches those too.
+  GEN_UNTRACKED="$(cd "${REPO_ROOT}" && git status --porcelain -- "${GEN_PATHS[@]}")"
+  if [ "$GEN_OK" -eq 1 ] \
+    && (cd "${REPO_ROOT}" && git diff --exit-code -- "${GEN_PATHS[@]}") \
+    && [ -z "$GEN_UNTRACKED" ]; then
+    record "generators idempotent (git diff + status clean)" PASS
   else
-    record "generators idempotent (git diff clean)" FAIL "regenerated output differs from committed files (or a generator failed)"
+    if [ -n "$GEN_UNTRACKED" ]; then
+      echo "untracked/modified generator output detected:"
+      echo "$GEN_UNTRACKED"
+    fi
+    record "generators idempotent (git diff + status clean)" FAIL "regenerated output differs from committed files, produced new untracked files, or a generator failed"
   fi
 else
-  record "generators idempotent (git diff clean)" SKIP "node or git not found on PATH"
+  record "generators idempotent (git diff + status clean)" SKIP "node or git not found on PATH"
   echo "SKIP(node or git not found on PATH)"
 fi
 

@@ -43,8 +43,10 @@ assets/
 
 ## .gitignore 規則（防止誤 commit 付費素材）
 
-`assets/tilesets/` 下除了本說明檔與授權登記檔外，實際素材圖檔不會加入
-版控——請勿手動 `git add -f` 繞過這個防呆。
+除自產（`scripts/gen_*.mjs` 產生、已登記 `CREDITS.md`）之白名單檔案外，
+第三方素材圖檔不會加入版控（白名單見 `.gitignore` 的 `!` 例外規則，如
+`office_shell_placeholder.png` 與 `agent_*.png`）——請勿手動
+`git add -f` 繞過這個防呆。
 
 ## 新增素材前的義務
 
