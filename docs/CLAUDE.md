@@ -22,11 +22,16 @@ Phase 0（環境與骨架）已實作完成，於分支 `phase/0-bootstrap`。
   `main.rs` 二進位外，也以 `lib.rs` 匯出 `router`/`state`/`healthz`
   modules，讓整合測試（`tests/healthz.rs`）可以直接用 `tower::ServiceExt`
   的 `oneshot` 打路由，不必真的啟動一個 process。
-- **`--knowledge-only` 用 delete-then-reinsert 實作「upsert」**：
-  `memories` 表沒有適合當 `ON CONFLICT` 對象的唯一鍵（且規格禁止改動
-  DDL 語意），所以 `scripts/seed_world.sh --knowledge-only` 對目標
-  world 的 `kind='knowledge'` 記憶先整批 delete 再 insert，達到「重跑
-  不會累積重複」的 upsert 效果，且不觸碰其他資料。
+- **`--knowledge-only` 是 delete-then-reinsert（replace/reseed），不是
+  upsert**（2026-07-07 驗收後修正措辭，見 Major #5）：`memories` 表沒有
+  適合當 `ON CONFLICT` 對象的唯一鍵（且規格禁止改動 DDL 語意），所以
+  `scripts/seed_world.sh --knowledge-only` 對目標 world 的
+  `kind='knowledge'` 記憶先整批 delete 再 insert。這達到「重跑不會累積
+  重複」且不觸碰其他資料，但**每次重跑都會讓所有 knowledge row 的
+  `id`/`created_at`/`last_access` 換新**——任何引用舊 knowledge id 的
+  資料（例如別筆 memory 的 `ref_ids`，或 `event_log` payload）重跑後會
+  懸空。這不是 upsert 語意下使用者會預期的行為，腳本 usage header 與
+  程式內註解已補上明確警語。
 - **web Docker image 用 dev mode，非 production standalone build**：
   Phase 0 只有一個佔位首頁，先求簡單／快速迭代；等頁面內容多起來、
   值得做 production 優化時再換多階段 build。
@@ -34,6 +39,43 @@ Phase 0（環境與骨架）已實作完成，於分支 `phase/0-bootstrap`。
   `next@14.2.18` 被 npm 標為已知安全漏洞（deprecated 警告直接附連結），
   同一 major/minor line 內已有 patched 版本（14.2.35），故採用後者，
   API 面幾乎無風險但補上安全修補。
+
+## 2026-07-07 驗收後修復
+
+P0 對抗驗收（`docs/eval/p0-review.md`，0 blocker／6 major／4 minor）後、
+疊 Phase 1 之前的修復批次，逐項對應驗收報告的編號：
+
+- **Major #1 — tier 級 timeout/retry**：`tier::Tier` 新增
+  `timeout()`/`max_retries()`（規格 §6.1 表：L0=15s/2、L1=30s/2、
+  L2=60s/2、L3=90s/1），掛到 `TierTarget` 隨 tier 解析結果傳遞（含
+  `llm_profile` 覆寫路徑——覆寫只換 provider:model，timeout/retry 仍跟
+  tier 走）。`ChatProvider::chat`／`EmbeddingProvider::embed` 簽名改為
+  接受呼叫方傳入的 `Duration`，5 個 provider 內原本寫死的
+  `.timeout(...)` 全部改吃傳入值。重試迴圈實作在 gateway 呼叫端
+  （`lib.rs` 的 `chat_with_retry`／`Gateway::chat_for_tier`），不在各
+  provider 內。
+- **Major #2 — 阮曉青雙線**：`seed_world.sh` 的通用 `rel_ins` CTE 排除
+  `(阮曉青→沈書萍)` 這個 pair，改由獨立的 `ruanxiaoqing_shenshuping_rel`
+  CTE 插入 `descriptor='業務指導'`；反向（沈→阮）維持
+  `'同部門同事'`不變。
+- **Major #3 — `desk_id` FK**：`001_init.sql` 表尾以 `alter table`（因
+  `layout_items` 宣告在 `agents` 之後，需前向引用解法）補上
+  `agents.desk_id references layout_items(id) on delete set null`，並
+  註記同 world 一致性由應用層（佈局編輯器）維護。
+- **Major #4 — healthz `providers` 形狀**：`provider_statuses()` 只留三家
+  雲端（anthropic/openai/gemini）；`ollama` 已有頂層 `ComponentHealth`
+  欄位不重複列，`mock` 本來就不列，兩者排除理由都補了註解。
+- **Major #5 — `--knowledge-only` 措辭**：程式與文件裡「upsert」全部
+  改稱 replace/reseed，usage header 補上 id-churn 警語（重跑會換掉
+  knowledge rows 的 id/created_at/last_access）。
+- **Major #6 — 決定性雜湊**：repo 根新增 `rust-toolchain.toml`
+  （pin `1.96.1`）；`mock.rs` 的 `DefaultHasher` 換成內嵌 FNV-1a，
+  doc comment 的「forever」改為「同一演算法下穩定」。
+- **Minor #4 — 計價缺項警告**：`PricingTable::get` 查無
+  `"provider:model"` 時仍維持 $0 記帳（行為不變），但加一行
+  `tracing::warn`（含 provider/model 名）。
+- **測試競態**：`lib.rs` 的 `gateway_from_env_disables_providers_without_keys`
+  改為持有 `ENV_MUTEX` 再動 env（符合該檔自己的既有規範）。
 
 ## 已知缺口（Known Gaps）
 
@@ -94,9 +136,15 @@ Phase 0（環境與骨架）已實作完成，於分支 `phase/0-bootstrap`。
 
 - **阮曉青 `reports_to`**：附錄 A.1 寫「沈書萍(業務指導)/高子軒」，是
   雙線（業務指導 vs 正式回報）但 DB schema `agents.reports_to` 只有
-  單一 FK。已採用 `reports_to = 高子軒`（正式回報線），業務指導關係
-  寫進 `core_identity` 敘述文字裡，未建第二條 FK。此為 `[DEFAULT]`
-  下的合理取捨，非規格衝突，但記在此供 FSC 檢視是否認同。
+  單一 FK。採用 `reports_to = 高子軒`（正式回報線）；業務指導關係
+  除了寫在 `core_identity` 敘述文字裡，**2026-07-07 驗收後修復
+  （Major #2）額外在 `relationships` 表補了一筆
+  `(阮曉青→沈書萍, descriptor='業務指導')` 的結構化 row**（該筆從通用
+  `rel_ins` CTE 中排除、單獨插入，避免被通用 CTE 覆蓋成
+  `'同部門同事'`），使這條 dotted line 現在可被查詢，不必只靠 LLM
+  重讀敘述文字才能取得。反向（沈書萍→阮曉青）仍是 `'同部門同事'`
+  （見下一條）。`reports_to` 本身仍只有單一 FK 這點未變，此為
+  `[DEFAULT]` 下的合理取捨，非規格衝突，記在此供 FSC 檢視是否認同。
 - **`relationships` 表的初始 descriptor 方向性**：規格只明確說「對直屬
   主管 descriptor='我的主管'」（下屬視角）；反方向（主管看下屬）規格
   未明講，`seed_world.sh` 預設也填 `'同部門同事'`。
