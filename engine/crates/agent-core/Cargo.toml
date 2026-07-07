@@ -1,0 +1,12 @@
+[package]
+name = "agent-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sim-core = { path = "../sim-core" }
+llm-gateway = { path = "../llm-gateway" }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
