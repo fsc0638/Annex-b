@@ -5,7 +5,11 @@
 
 ## 目前狀態
 
-Phase 0（環境與骨架）已實作完成，於分支 `phase/0-bootstrap`。
+Phase 1（辦公室世界與渲染，T1.1–T1.5）已實作完成，於分支
+`phase/1-world`（基於 P0 驗收後修復批次的 `phase/0-bootstrap` tip）。
+9 名 agent 依附錄 A.2 於 07:00–09:00 從大門進場走到自己座位坐下；
+前端 PixiJS 即時渲染＋時間控制；workspace 測試 120 個全綠（P0 基準 70）。
+Phase 0（環境與骨架）見 `phase/0-bootstrap`。
 
 ## 重大決策
 
@@ -77,6 +81,47 @@ P0 對抗驗收（`docs/eval/p0-review.md`，0 blocker／6 major／4 minor）後
 - **測試競態**：`lib.rs` 的 `gateway_from_env_disables_providers_without_keys`
   改為持有 `ENV_MUTEX` 再動 env（符合該檔自己的既有規範）。
 
+## Phase 1 重大決策（2026-07-08）
+
+- **不開 Tiled GUI，底圖用產生器**：`scripts/gen_office_shell.mjs` 直接輸出
+  合法 Tiled JSON（48×32、embedded tileset、牆/窗 tile 帶 `collides=true`
+  自訂屬性、大門＝下緣中央 x=23..24 兩格開口）。**家具座標不是第二份副本
+  ——由 `scripts/lib/seed_layout.mjs` 解析 `seed_world.sh` 的 SQL 字面值**
+  （與 `check_seed_counts.sh` 同策略），產生器寫檔前先做 flood-fill 連通
+  驗證（不過就 exit 1 不寫檔）。同一解析器供 `gen_world_fixture.mjs`
+  （sim-core fixture＋web mock snapshot）與 `gen_agent_sprites.mjs` 使用。
+  三個產生器輸出全部決定性（重跑 byte-identical），ci.sh 有專層驗證。
+- **sim-core 的 DB 載入路徑 feature-gate（`db`）**：保持 sim-core 預設
+  build 無 I/O 依賴（P0 驗收認可的純資料 crate 形狀）；api-server 以
+  `features=["db"]` 啟用，workspace build 仍會編譯到它。一律 sqlx
+  runtime query（鐵則不變）。
+- **speed 語意**：x1/x2/x5 只縮短**牆鐘** tick 間隔
+  （`tick_interval_ms = tick_ms / speed`）；`sec_per_tick`（遊戲秒/tick）
+  與每 tick 移動格數不變——加速＝同樣的世界行為更快播放。speed 是
+  runtime 屬性不落 DB；snapshot 的 `world.speed` 由 server 注入。
+  有測試斷言 x1 與 x5 的逐 tick 行為完全一致。
+- **A* 決定性 tie-break**：min-heap key `(f, h, row-major idx)`、鄰居展開
+  順序固定 N/E/S/W、g 嚴格變小才更新 parent。實圖 golden：門→deskA-01
+  椅的路徑形狀是「沿 x=23 直上到 y=8 再向西」（L 形）。改演算法必須
+  同時改 golden 並在 PR 說明。
+- **通勤時刻（A.2 的工程化）**：副總 08:20、經理＋約聘 08:30、高專
+  08:40、5 名專員 08:43/08:46/08:49/08:52/08:55——按**姓名 byte 序**
+  錯開，與載入來源的 row 順序無關（fixture 與 DB 載入結果一致）。
+  Phase 2 起這只作 day-1 daily_plan 的 prompt 先驗（A.2：非硬性）。
+- **動態避讓＝等待再繞路**：A* 只吃靜態碰撞；撞到別的 agent 先等
+  4 tick，還堵著就帶上「其他 agent 當前位置」重跑 A*。agent 處理順序
+  ＝姓名排序（決定性）。headless 測試斷言全程無同格、無卡死 >60 tick。
+- **WS lag policy**：broadcast channel 落後的 client 直接斷線，靠前端
+  自動重連拿全新 snapshot 恢復一致性（snapshot 全量取代 store 狀態，
+  這也同時實作了「重整頁面正確還原」驗收項）。
+- **佔位素材全自製 CC0**：tileset 與 9 個 spritesheet（4 向×3 幀）由
+  stdlib-only PNG encoder（`scripts/lib/png.mjs`）程式生成，登記於
+  `assets/CREDITS.md`；`.gitignore` 只白名單放行這些自製檔，付費素材
+  禁令不變。日後換 LimeZu/LPC 素材時整組替換並補署名。
+- **世界開機為 paused**：與 seed 的 `status='paused'` 一致，按 UI 播放
+  鍵才開始跑；`WORLD_SOURCE=db|fixture` 決定世界來源（fixture＝本機
+  無 DB 的 demo 模式，`FIXTURE_PATH`/`TMJ_PATH` 可覆寫路徑）。
+
 ## 已知缺口（Known Gaps）
 
 - **v1 六份 prompt（importance/decompose/react/reflect_questions/
@@ -97,10 +142,23 @@ P0 對抗驗收（`docs/eval/p0-review.md`，0 blocker／6 major／4 minor）後
   WARN。要補上真正的 embedding，需在裝有 Ollama（含
   `mxbai-embed-large`）的環境下執行
   `scripts/seed_world.sh --knowledge-only`。
-- **`office_shell.tmj` 底圖尚未製作**：Phase 0 的 `assets/maps/` 只有
-  `.gitkeep` 佔位；Tiled 底圖是 Phase 1 T1.1 的工作。`seed_world.sh`
-  裡的 layout_items 座標已經先依 48×32 地圖規劃好（見下方「佈局座標
-  設計」），Phase 1 做底圖時牆體/門/窗要跟這個座標系一致。
+- ~~**`office_shell.tmj` 底圖尚未製作**~~：Phase 1 T1.1 已完成（產生器
+  `scripts/gen_office_shell.mjs`，見上方 Phase 1 決策），底圖與「佈局
+  座標設計」座標系已對齊並有連通性測試。
+- **視覺素材是自製佔位**：tileset 4 色格、家具是 kind 上色色塊、小人是
+  程式畫的像素人。功能完整但美術品質低；換正式素材（LimeZu 付費層或
+  LPC 產生器）時需替換 PNG＋前端家具 Graphics 改 sprite，並更新
+  CREDITS.md 的授權義務。
+- **DB 載入路徑（`sim-core::db` / `WORLD_SOURCE=db`）未對真實 DB 驗證**：
+  本機無 psql/Docker，只保證編譯過＋與 fixture 共用 `from_parts`。
+  第一次在 compose 環境跑時要驗證：`order by created_at` 的世界挑選、
+  affords（text[]）/llm_profile（jsonb）欄位的 try_get 型別對應。
+- **通勤只避讓、不排隊禮讓**：兩 agent 同 tick 同時要進同一格時由姓名
+  排序先到先得，後者等待/繞路。9 人錯開時刻下實測無卡死；若 Phase 2+
+  出現高密度動線（晨會全員同時移動）可能需要更聰明的協商（保留觀察）。
+- **`08:30` 經理與約聘同刻進場**：大門寬 2 格，兩人同 tick 各佔一格
+  進場；若未來門縮成 1 格，後到者會延後 1 tick（有 spawn 容忍測試，
+  斷言 ≤60 秒 slip）。
 - **`docker compose config` 未實機驗證**：本機沒有 Docker，
   `docker-compose.yml` 語法用 Python YAML parser 驗證過格式正確，
   三個 service（postgres/engine/web）與 volume 都在，但沒有實際跑過
@@ -149,14 +207,23 @@ P0 對抗驗收（`docs/eval/p0-review.md`，0 blocker／6 major／4 minor）後
   主管 descriptor='我的主管'」（下屬視角）；反方向（主管看下屬）規格
   未明講，`seed_world.sh` 預設也填 `'同部門同事'`。
 
-## 下一步（Phase 1 起）
+## 下一步（Phase 2 起）
 
-1. Docker 環境驗證：在有 Docker 的機器上跑 `docker compose up`，確認
-   三個 service 都能起來、`GET /api/v1/healthz` 回報正確。
-2. 在有 Ollama 的環境跑 `scripts/check_ollama.sh` 確認模型已拉取，
-   再跑 `scripts/seed_world.sh` 完整 seed 一個 world（含真正的
-   embedding）。
-3. Phase 1 T1.1 起：Tiled 製作 `office_shell.tmj`，對齊上方「佈局座標
-   設計」的區塊邊界。
-4. 待 FSC 提供 v1 六份 prompt 全文後，覆蓋現有佔位檔（熱重載機制已就
-   緒，不需改程式碼）。
+1. **Phase 2 認知核心與工作模型（T2.1–T2.8）**：記憶管線（perceive→
+   去重→importance→embedding→入庫）、檢索純函數＋pgvector、daily_plan
+   ＋lazy 細化、react/對話迴圈、晨會機制（5.9）、work_progress（5.10）、
+   反思＋關係更新、prompts 熱重載＋JSON 防護。plans 執行將取代 Phase 1
+   的硬編碼通勤（A.2 降級為 day-1 prompt 先驗）。
+2. **P0 復核遺留（P2 必辦）：gateway retry 不分錯誤類別（4xx/Disabled
+   也重試）——P2 接真實呼叫時改為僅 Timeout/5xx/網路錯誤重試**（來源：
+   `docs/eval/p0-review.md` minor；現行 `chat_with_retry` 對所有錯誤
+   一視同仁）。
+3. Docker 環境驗證：在有 Docker 的機器跑 `docker compose up`（三
+   service＋healthz＋`WORLD_SOURCE=db` 載入 seed world＋前端連 ws 看
+   通勤）。engine 容器已掛 `./assets` 只讀卷供 tmj。
+4. 在有 Ollama 的環境跑 `scripts/check_ollama.sh`＋`scripts/seed_world.sh`
+   完整 seed（含真 embedding）。
+5. 待 FSC 提供 v1 六份 prompt 全文後，覆蓋現有佔位檔（熱重載已就緒）。
+6. Phase 2 起 event_log 需要落 DB（golden replay 的雜湊對象）；屆時
+   migration 機制要照上方「initdb.d 只跑一次」的備忘改用
+   `sqlx migrate run`（或等價）。

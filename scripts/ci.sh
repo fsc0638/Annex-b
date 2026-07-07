@@ -135,6 +135,47 @@ else
 fi
 
 # ---------------------------------------------------------------------
+# Layer 5b: web production build (Phase 1 acceptance surface — the
+# PixiJS page must type-check and build, not just lint)
+# ---------------------------------------------------------------------
+section "web: pnpm run build"
+if command -v npx >/dev/null 2>&1; then
+  if (cd "${REPO_ROOT}/web" && npx -y pnpm@9 run build); then
+    record "web pnpm run build" PASS
+  else
+    record "web pnpm run build" FAIL
+  fi
+else
+  record "web pnpm run build" SKIP "npx/node not found on PATH"
+  echo "SKIP(npx/node not found on PATH)"
+fi
+
+# ---------------------------------------------------------------------
+# Layer 5c: asset generator idempotency (Phase 1 T1.1/T1.2/T1.4
+# acceptance: re-running the generators must reproduce the committed
+# artifacts byte-for-byte — a diff here means someone hand-edited a
+# generated file or changed a generator without regenerating outputs)
+# ---------------------------------------------------------------------
+section "asset generators: regenerate and diff (idempotency)"
+if command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  GEN_OK=1
+  (cd "${REPO_ROOT}" && node scripts/gen_office_shell.mjs) || GEN_OK=0
+  (cd "${REPO_ROOT}" && node scripts/gen_world_fixture.mjs) || GEN_OK=0
+  (cd "${REPO_ROOT}" && node scripts/gen_agent_sprites.mjs) || GEN_OK=0
+  if [ "$GEN_OK" -eq 1 ] && (cd "${REPO_ROOT}" && git diff --exit-code -- \
+      assets/maps assets/tilesets assets/sprites/agents \
+      web/public/maps web/public/tilesets web/public/sprites web/public/mock \
+      engine/crates/sim-core/tests/fixtures); then
+    record "generators idempotent (git diff clean)" PASS
+  else
+    record "generators idempotent (git diff clean)" FAIL "regenerated output differs from committed files (or a generator failed)"
+  fi
+else
+  record "generators idempotent (git diff clean)" SKIP "node or git not found on PATH"
+  echo "SKIP(node or git not found on PATH)"
+fi
+
+# ---------------------------------------------------------------------
 # Layer 6: docker compose config validation (needs docker)
 # ---------------------------------------------------------------------
 section "docker compose config (validation only, no containers started)"
