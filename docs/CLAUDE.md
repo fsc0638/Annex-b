@@ -8,7 +8,7 @@
 Phase 1（辦公室世界與渲染，T1.1–T1.5）已實作完成，於分支
 `phase/1-world`（基於 P0 驗收後修復批次的 `phase/0-bootstrap` tip）。
 9 名 agent 依附錄 A.2 於 07:00–09:00 從大門進場走到自己座位坐下；
-前端 PixiJS 即時渲染＋時間控制；workspace 測試 120 個全綠（P0 基準 70）。
+前端 PixiJS 即時渲染＋時間控制；workspace 測試 119 個全綠（P0 基準 70）。
 Phase 0（環境與骨架）見 `phase/0-bootstrap`。
 
 ## 重大決策
