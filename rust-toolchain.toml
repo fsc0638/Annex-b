@@ -1,0 +1,12 @@
+# Pins the Rust toolchain for this repo (Major #6 fix from docs/eval/p0-review.md).
+#
+# Why: engine/crates/llm-gateway/src/providers/mock.rs's determinism
+# guarantee (spec 6.1 success criterion S6: "同 seed + mock LLM 下模擬 100%
+# 可重現") previously relied on `std::collections::hash_map::DefaultHasher`,
+# whose specific algorithm is not contractually guaranteed stable across
+# Rust std versions. Pinning the toolchain here means "reproducible within
+# this pinned toolchain" is an environment guarantee, on top of (not a
+# replacement for — see mock.rs) using an explicitly algorithm-pinned hash
+# for the actual determinism mechanism.
+[toolchain]
+channel = "1.96.1"
