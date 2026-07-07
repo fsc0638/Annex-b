@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-annexb}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-annexb}
+      POSTGRES_DB: ${POSTGRES_DB:-annexb}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-annexb} -d ${POSTGRES_DB:-annexb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  engine:
+    build:
+      context: ./engine
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-annexb}:${POSTGRES_PASSWORD:-annexb}@postgres:5432/${POSTGRES_DB:-annexb}
+      # Ollama runs on the host machine, not in this compose stack — the
+      # engine reaches it via host.docker.internal (spec 3.2: "Ollama 於
+      # 宿主機"). extra_hosts below makes this resolve on Linux too;
+      # Docker Desktop (macOS target platform) provides it natively.
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      LLM_MODE: ${LLM_MODE:-mock}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      LLM_L0_MODEL: ${LLM_L0_MODEL:-mxbai-embed-large}
+      LLM_L1_MODEL: ${LLM_L1_MODEL:-qwen2.5:7b-instruct}
+      LLM_L2_PROVIDER: ${LLM_L2_PROVIDER:-anthropic}
+      LLM_L2_MODEL: ${LLM_L2_MODEL:-claude-haiku-4-5}
+      LLM_L3_PROVIDER: ${LLM_L3_PROVIDER:-anthropic}
+      LLM_L3_MODEL: ${LLM_L3_MODEL:-claude-sonnet-4-5}
+      DAILY_BUDGET_USD: ${DAILY_BUDGET_USD:-2.0}
+      PORT: 8080
+      RUST_LOG: ${RUST_LOG:-info}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8080:8080"
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - engine
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:
