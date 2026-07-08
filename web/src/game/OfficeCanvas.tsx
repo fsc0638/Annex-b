@@ -53,6 +53,48 @@ const FURNITURE_COLORS: Record<LayoutItemRow["kind"], number> = {
   whiteboard: 0xe8e8ec,
 };
 
+const LIMEZU_FURNITURE_MANIFEST_URL =
+  "/tilesets/limezu-modern-office/manifest.json";
+const FURNITURE_KINDS = new Set(
+  Object.keys(FURNITURE_COLORS) as LayoutItemRow["kind"][]
+);
+let furnitureSpriteLoadWarned = false;
+
+type FurnitureSpriteFit = "contain" | "cover" | "stretch";
+
+interface FurnitureSpriteManifestEntry {
+  id?: string;
+  label?: string;
+  file?: string;
+  image?: string;
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+  fit?: FurnitureSpriteFit;
+  scale?: number;
+  offsetX?: number;
+  offsetY?: number;
+}
+
+interface LimeZuFurnitureManifest {
+  sprites?: Record<string, FurnitureSpriteManifestEntry>;
+  catalog?: FurnitureSpriteManifestEntry[];
+}
+
+interface FurnitureSpriteEntry {
+  texture: Texture;
+  fit: FurnitureSpriteFit;
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+}
+
+interface FurnitureSpriteCatalog {
+  byKind: Partial<Record<LayoutItemRow["kind"], FurnitureSpriteEntry>>;
+  byId: Record<string, FurnitureSpriteEntry>;
+}
+
 interface AgentVisual {
   root: Container;
   sprite: AnimatedSprite;
@@ -100,12 +142,210 @@ function sliceSpriteSheet(sheet: Texture): Texture[][] {
   return byDir;
 }
 
-function drawFurniture(container: Container, layout: LayoutItemRow[]) {
-  // Redraw in place rather than removeChildren() + a brand new Graphics:
-  // removeChildren() only detaches the old Graphics from the display
-  // list, it doesn't destroy its GPU geometry, so a fresh Container on
-  // every world_snapshot leaked one GPU buffer per snapshot. A single
-  // persistent Graphics reused via clear() has no such leak.
+function isFurnitureKind(value: string): value is LayoutItemRow["kind"] {
+  return FURNITURE_KINDS.has(value as LayoutItemRow["kind"]);
+}
+
+function warnFurnitureSpriteLoadFailure(err: unknown) {
+  if (furnitureSpriteLoadWarned) return;
+  furnitureSpriteLoadWarned = true;
+  console.warn(
+    "[sim] LimeZu furniture manifest unavailable; using generated placeholders",
+    err
+  );
+}
+
+async function loadFurnitureSprites(): Promise<FurnitureSpriteCatalog | null> {
+  try {
+    const response = await fetch(LIMEZU_FURNITURE_MANIFEST_URL, {
+      cache: "no-store",
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} while loading furniture manifest`);
+    }
+
+    const manifest = (await response.json()) as LimeZuFurnitureManifest;
+    const sprites = manifest.sprites ?? {};
+    const textureCache = new Map<string, Promise<Texture>>();
+    const catalog: FurnitureSpriteCatalog = { byKind: {}, byId: {} };
+
+    const loadSpriteEntry = async (
+      spriteDef: FurnitureSpriteManifestEntry
+    ): Promise<FurnitureSpriteEntry | null> => {
+      if (!spriteDef.image) return null;
+      let pendingTexture = textureCache.get(spriteDef.image);
+      if (!pendingTexture) {
+        pendingTexture = Assets.load(spriteDef.image).then((texture) => {
+          const loaded = texture as Texture;
+          loaded.source.scaleMode = "nearest";
+          return loaded;
+        });
+        textureCache.set(spriteDef.image, pendingTexture);
+      }
+      const baseTexture = await pendingTexture;
+      const hasFrame =
+        spriteDef.x !== undefined ||
+        spriteDef.y !== undefined ||
+        spriteDef.w !== undefined ||
+        spriteDef.h !== undefined;
+      const texture = hasFrame
+        ? new Texture({
+            source: baseTexture.source,
+            frame: new Rectangle(
+              spriteDef.x ?? 0,
+              spriteDef.y ?? 0,
+              spriteDef.w ?? TILE,
+              spriteDef.h ?? TILE
+            ),
+          })
+        : baseTexture;
+      return {
+        texture,
+        fit: spriteDef.fit ?? "contain",
+        scale: spriteDef.scale ?? 1,
+        offsetX: spriteDef.offsetX ?? 0,
+        offsetY: spriteDef.offsetY ?? 0,
+      };
+    };
+
+    for (const [kind, spriteDef] of Object.entries(sprites)) {
+      if (!isFurnitureKind(kind) || !spriteDef.image) continue;
+      const spriteEntry = await loadSpriteEntry(spriteDef);
+      if (spriteEntry) catalog.byKind[kind] = spriteEntry;
+    }
+
+    for (const material of manifest.catalog ?? []) {
+      if (!material.id && !material.image) continue;
+      const spriteEntry = await loadSpriteEntry(material);
+      if (!spriteEntry) continue;
+      if (material.id) catalog.byId[material.id] = spriteEntry;
+      if (material.image) catalog.byId[material.image] = spriteEntry;
+    }
+
+    return Object.keys(catalog.byKind).length > 0 ||
+      Object.keys(catalog.byId).length > 0
+      ? catalog
+      : null;
+  } catch (err) {
+    warnFurnitureSpriteLoadFailure(err);
+    return null;
+  }
+}
+
+function drawFurniturePlaceholder(g: Graphics, item: LayoutItemRow) {
+  const fp = footprintOf(item);
+  const px = fp.x * TILE;
+  const py = fp.y * TILE;
+  const w = fp.w * TILE;
+  const h = fp.h * TILE;
+  const color = FURNITURE_COLORS[item.kind] ?? 0x888888;
+  if (item.kind === "plant") {
+    g.circle(px + w / 2, py + h / 2, w * 0.38).fill(color);
+    g.circle(px + w / 2, py + h * 0.72, w * 0.18).fill(0x6b4a2f); // pot
+  } else if (item.kind === "chair") {
+    g.roundRect(px + 7, py + 7, w - 14, h - 14, 4).fill(color);
+  } else {
+    g.rect(px + 2, py + 2, w - 4, h - 4).fill(color);
+    g.rect(px + 2, py + 2, w - 4, 3).fill(0xffffff, 0.12); // top light
+  }
+}
+
+function addFurnitureSprite(
+  spriteLayer: Container,
+  spriteDef: FurnitureSpriteEntry,
+  item: LayoutItemRow
+) {
+  const fp = footprintOf(item);
+  const px = fp.x * TILE;
+  const py = fp.y * TILE;
+  const w = fp.w * TILE;
+  const h = fp.h * TILE;
+  const sprite = new Sprite(spriteDef.texture);
+  const texW = Math.max(sprite.texture.width, 1);
+  const texH = Math.max(sprite.texture.height, 1);
+
+  if (spriteDef.fit === "stretch") {
+    sprite.x = px + spriteDef.offsetX;
+    sprite.y = py + spriteDef.offsetY;
+    sprite.width = w * spriteDef.scale;
+    sprite.height = h * spriteDef.scale;
+  } else {
+    const fitScale =
+      spriteDef.fit === "cover"
+        ? Math.max(w / texW, h / texH)
+        : Math.min(w / texW, h / texH);
+    const scale = fitScale * spriteDef.scale;
+    sprite.scale.set(scale);
+    sprite.x = px + (w - texW * scale) / 2 + spriteDef.offsetX;
+    sprite.y = py + (h - texH * scale) / 2 + spriteDef.offsetY;
+  }
+
+  spriteLayer.addChild(sprite);
+}
+
+function spriteEntryForItem(
+  item: LayoutItemRow,
+  sprites: FurnitureSpriteCatalog
+): FurnitureSpriteEntry | undefined {
+  const spriteMeta = readSpriteMeta(item.meta);
+  if (spriteMeta?.id && sprites.byId[spriteMeta.id]) {
+    return sprites.byId[spriteMeta.id];
+  }
+  if (spriteMeta?.image && sprites.byId[spriteMeta.image]) {
+    return sprites.byId[spriteMeta.image];
+  }
+  return sprites.byKind[item.kind];
+}
+
+function readSpriteMeta(meta: unknown): { id?: string; image?: string } | null {
+  if (!isPlainRecord(meta)) return null;
+  const sprite = meta.sprite;
+  if (!isPlainRecord(sprite)) return null;
+  const id = typeof sprite.id === "string" ? sprite.id : undefined;
+  const image = typeof sprite.image === "string" ? sprite.image : undefined;
+  return id || image ? { id, image } : null;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function drawFurniture(
+  container: Container,
+  layout: LayoutItemRow[],
+  sprites?: FurnitureSpriteCatalog | null
+) {
+  // Keep one persistent Graphics for fallback placeholders. Sprite children are
+  // destroyed on each layout redraw, while the Graphics is cleared in place to
+  // avoid leaking GPU geometry during frequent world_snapshot updates.
+  let g = container.children[0] as Graphics | undefined;
+  let spriteLayer = container.children[1] as Container | undefined;
+  if (!g) {
+    g = new Graphics();
+    container.addChild(g);
+  } else {
+    g.clear();
+  }
+  if (!spriteLayer) {
+    spriteLayer = new Container();
+    container.addChild(spriteLayer);
+  }
+  for (const child of spriteLayer.removeChildren()) {
+    child.destroy({ children: true });
+  }
+
+  for (const item of layout) {
+    const spriteDef = sprites ? spriteEntryForItem(item, sprites) : undefined;
+    if (spriteDef) {
+      addFurnitureSprite(spriteLayer, spriteDef, item);
+    } else {
+      drawFurniturePlaceholder(g, item);
+    }
+  }
+}
+
+function drawGrid(container: Container, visible: boolean) {
   let g = container.children[0] as Graphics | undefined;
   if (!g) {
     g = new Graphics();
@@ -113,22 +353,21 @@ function drawFurniture(container: Container, layout: LayoutItemRow[]) {
   } else {
     g.clear();
   }
-  for (const item of layout) {
-    const fp = footprintOf(item);
-    const px = fp.x * TILE;
-    const py = fp.y * TILE;
-    const w = fp.w * TILE;
-    const h = fp.h * TILE;
-    const color = FURNITURE_COLORS[item.kind] ?? 0x888888;
-    if (item.kind === "plant") {
-      g.circle(px + w / 2, py + h / 2, w * 0.38).fill(color);
-      g.circle(px + w / 2, py + h * 0.72, w * 0.18).fill(0x6b4a2f); // pot
-    } else if (item.kind === "chair") {
-      g.roundRect(px + 7, py + 7, w - 14, h - 14, 4).fill(color);
-    } else {
-      g.rect(px + 2, py + 2, w - 4, h - 4).fill(color);
-      g.rect(px + 2, py + 2, w - 4, 3).fill(0xffffff, 0.12); // top light
-    }
+  container.visible = visible;
+  if (!visible) return;
+  for (let x = 0; x <= MAP_W; x++) {
+    g.moveTo(x * TILE, 0).lineTo(x * TILE, MAP_H * TILE).stroke({
+      color: 0x66d9ef,
+      alpha: 0.16,
+      width: 1,
+    });
+  }
+  for (let y = 0; y <= MAP_H; y++) {
+    g.moveTo(0, y * TILE).lineTo(MAP_W * TILE, y * TILE).stroke({
+      color: 0x66d9ef,
+      alpha: 0.16,
+      width: 1,
+    });
   }
 }
 
@@ -165,8 +404,21 @@ export default function OfficeCanvas() {
 
       const mapLayer = new Container();
       const furnitureLayer = new Container();
+      const gridLayer = new Container();
       const agentLayer = new Container();
-      app.stage.addChild(mapLayer, furnitureLayer, agentLayer);
+      app.stage.addChild(mapLayer, furnitureLayer, gridLayer, agentLayer);
+      let furnitureSprites: FurnitureSpriteCatalog | null = null;
+      let lastLayout: LayoutItemRow[] | null = null;
+      let lastAgents: Record<string, AgentRow> | null = null;
+      let lastEditing = false;
+
+      void loadFurnitureSprites().then((sprites) => {
+        if (cancelled) return;
+        furnitureSprites = sprites;
+        if (lastLayout) {
+          drawFurniture(furnitureLayer, lastLayout, furnitureSprites);
+        }
+      });
 
       // ---- Static map from tmj + tileset -----------------------------
       const tmj: TmjDoc = await (await fetch("/maps/office_shell.tmj")).json();
@@ -212,6 +464,7 @@ export default function OfficeCanvas() {
       // callback) and only needs cheap read access to already-built
       // visuals, so it iterates this instead of awaiting `visuals`.
       const resolvedVisuals = new Map<string, AgentVisual>();
+      const lastVisualLoadWarnAt = new Map<string, number>();
       const labelStyle = new TextStyle({
         fontFamily: 'system-ui, "PingFang TC", "Noto Sans TC", sans-serif',
         fontSize: 12,
@@ -291,17 +544,26 @@ export default function OfficeCanvas() {
         else v.sprite.gotoAndStop(1);
       }
 
+      function warnVisualLoadFailure(agent: AgentRow, err: unknown) {
+        const now = Date.now();
+        const last = lastVisualLoadWarnAt.get(agent.id) ?? 0;
+        if (now - last < 5000) return;
+        lastVisualLoadWarnAt.set(agent.id, now);
+        console.warn(`[sim] visual load failed for ${agent.name}`, err);
+      }
+
       async function syncAgents(agents: Record<string, AgentRow>) {
         for (const agent of Object.values(agents)) {
           let v: AgentVisual;
           try {
             v = await ensureVisual(agent);
-          } catch {
+          } catch (err) {
             // This agent's visual failed to load this round (ensureVisual
             // already evicted its cached promise so the next sync retries).
             // Skip ONLY this agent — the remaining agents in the roster must
             // still receive their position/status updates, so we continue
             // the loop instead of letting the throw abort it.
+            warnVisualLoadFailure(agent, err);
             continue;
           }
           const tx = agent.pos_x * TILE;
@@ -363,12 +625,18 @@ export default function OfficeCanvas() {
       }
 
       // Initial state + subscription (zustand vanilla subscribe).
-      let lastLayout: LayoutItemRow[] | null = null;
-      let lastAgents: Record<string, AgentRow> | null = null;
-      const applyState = (layout: LayoutItemRow[], agents: Record<string, AgentRow>) => {
+      const applyState = (
+        layout: LayoutItemRow[],
+        agents: Record<string, AgentRow>,
+        editing: boolean
+      ) => {
         if (layout !== lastLayout) {
           lastLayout = layout;
-          drawFurniture(furnitureLayer, layout);
+          drawFurniture(furnitureLayer, layout, furnitureSprites);
+        }
+        if (editing !== lastEditing) {
+          lastEditing = editing;
+          drawGrid(gridLayer, editing);
         }
         if (agents !== lastAgents) {
           lastAgents = agents;
@@ -381,9 +649,9 @@ export default function OfficeCanvas() {
         }
       };
       const initial = useGameStore.getState();
-      applyState(initial.layout, initial.agents);
+      applyState(initial.layout, initial.agents, initial.world?.status === "editing");
       unsubscribe = useGameStore.subscribe((state) =>
-        applyState(state.layout, state.agents)
+        applyState(state.layout, state.agents, state.world?.status === "editing")
       );
 
       // Movement interpolation: 1 tile per tick, tick pace from store.
