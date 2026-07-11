@@ -27,30 +27,39 @@ assets/
 
 ## LimeZu 購買與放置說明
 
-1. 前往 itch.io 搜尋 LimeZu「Modern Office」（或「Modern Interiors」）資產包。
-2. 免費層即可先行測試；若需要更多辦公家具變化，購買完整版。
-3. 下載後，將整包內容放到本機：
+1. 前往 itch.io 搜尋 LimeZu「Modern Office Revamped」與「Modern Interiors」
+   資產包。
+2. 免費層即可先行測試；若需要更多辦公家具與 26 主題（會議廳/廚房/客廳/
+   浴室/教室圖書館/…等）變化，購買完整版。
+3. 下載後，將整包內容（含 `Modern_Office_Revamped_v1.2/` 與
+   `moderninteriors-win/` 等子資料夾）放到本機：
    ```
    assets/tilesets/limezu-modern-office/
    ```
    此路徑內容已被 `.gitignore` 排除（見下方規則）——**只有**
-   `manifest.example.json`（schema 範本，見下一步）例外會進版控，不會被誤
-   commit 真正的圖檔。
-4. 複製 schema 範本並依你實際下載的檔名編輯：
-   ```
-   cp assets/tilesets/limezu-modern-office/manifest.example.json \
-      assets/tilesets/limezu-modern-office/manifest.json
-   ```
-   （`manifest.example.json` 內的 `_comment`/`_schema_comment` 欄位說明每個
-   欄位的意義；`sprites` 的 key 必須是編輯器認得的 10 種家具種類之一。）
-5. 執行 `node scripts/sync_limezu_assets.mjs` 把 manifest.json 引用的檔案
-   複製到 `web/public/tilesets/limezu-modern-office/`（同樣被 `.gitignore`
-   整個排除）並產生前端可讀的 manifest.json；缺 `manifest.json` 或整個
-   來源目錄時，此腳本會印出明確的下一步指引（不報錯）。地圖底圖本身不再
-   靠 Tiled GUI 手動製作——由 `scripts/gen_office_shell.mjs` 產生（見
-   `docs/CLAUDE.md` Phase 1 決策段）。
-6. 若團隊多人開發，每個人各自依本說明在本機放置一份 LimeZu 素材與自己的
-   `manifest.json`，不透過 git 同步。
+   `manifest.example.json`（schema 範本／文件參考，見下一步）例外會進版控，
+   不會被誤 commit 真正的圖檔。
+4. 執行 `node scripts/sync_limezu_assets.mjs`（ADR-003 D1：多來源掃描器）：
+   - 掃描 `Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/`
+     （339 件辦公室單品，category `office`）；
+   - 掃描 `moderninteriors-win/1_Interiors/32x32/Theme_Sorter_Singles_32x32/
+     <N>_<主題名>/`（26 個主題資料夾中實際存在的最多到 24 個，每個一個
+     category；只取 32×32 標準陰影一份，不含 16/48 尺寸與
+     Black_Shadow/Shadowless 重複變體）；
+   - 自動分類編目、把選定的 PNG 複製到
+     `web/public/tilesets/limezu-modern-office/`（同樣被 `.gitignore`
+     整個排除）、產生前端可讀的 `manifest.json`（`sprites`/`catalog`/
+     `categories` 三段，schema 詳見 `manifest.example.json` 的
+     `_schema_comment`）。
+   - **不需要**手動複製或編輯 `manifest.json`——sprites 的 10 種家具代表圖
+     是腳本內寫死挑選（`SPRITE_PICKS`），catalog/categories 全部來自即時
+     掃描。缺整個來源目錄（或兩個來源都掃不到任何檔案）時，此腳本會印出
+     明確的下一步指引（不報錯，除非帶 `--require` 旗標）。
+   - 地圖底圖本身不靠 Tiled GUI 手動製作——由 `scripts/gen_office_shell.mjs`
+     產生（見 `docs/CLAUDE.md` Phase 1 決策段）。
+5. 若團隊多人開發，每個人各自依本說明在本機放置一份 LimeZu 素材，執行
+   `node scripts/sync_limezu_assets.mjs` 各自產生 public 複本，不透過 git
+   同步。
 
 ## .gitignore 規則（防止誤 commit 付費素材）
 

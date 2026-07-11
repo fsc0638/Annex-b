@@ -1,46 +1,83 @@
 {
-  "_comment": "TEMPLATE — copy this file to manifest.json in this same directory (assets/tilesets/limezu-modern-office/) and edit the `file` path in each sprite entry to match the actual filenames inside your downloaded LimeZu 'Modern Office' package (see ../../README.md section 'LimeZu 購買與放置說明' for where to place the package). After editing, run `node scripts/sync_limezu_assets.mjs` to copy the referenced files into web/public/tilesets/limezu-modern-office/ and generate the web-consumable manifest.json there. This file itself (manifest.example.json) is committed to the repo as documentation/schema reference and is never read by the sync script — only manifest.json (gitignored, machine-local) is.",
-  "_schema_comment": "`sprites` is an object keyed by furniture kind. Keys MUST be one of the 10 LayoutKind values consumed by web/src/panels/LayoutEditorPanel.tsx (see its `KINDS` array): desk, exec_desk, chair, partition, meeting_table, cabinet, printer, plant, pantry_counter, whiteboard. Unrecognized keys are silently ignored by sync_limezu_assets.mjs (isLayoutKind() guard). Each sprite entry: `file` (required, string) — path to the PNG, relative to this directory; `fit` (optional, 'contain'|'cover'|'stretch') — how the editor's furniture-palette thumbnail should fit the image, defaults to 'contain'; `scale` (optional, number) — extra size multiplier when the sprite is drawn on the layout board; `offsetX`/`offsetY` (optional, number) — pixel offset to align the sprite's visual origin with its logical tile anchor. Any other keys are passed through unchanged into the generated web manifest but are not currently consumed by the editor.",
+  "_comment": "REFERENCE ONLY — this file documents the shape of the GENERATED public manifest (web/public/tilesets/limezu-modern-office/manifest.json). It is not read by scripts/sync_limezu_assets.mjs and does not need to be copied anywhere. To produce the real thing: place your purchased LimeZu 'Modern Office Revamped' and 'Modern Interiors' packages under assets/tilesets/limezu-modern-office/ (see ../../README.md 'LimeZu 購買與放置說明' for the exact expected sub-paths), then run `node scripts/sync_limezu_assets.mjs`. The script scans both packages, classifies every 32x32 single-item PNG into a category, copies the referenced files into web/public/tilesets/limezu-modern-office/, and writes manifest.json there — no manual per-machine manifest editing is needed (ADR-003 D1).",
+  "_schema_comment": "`sprites` — object keyed by one of the 10 LayoutKind values consumed by web/src/panels/LayoutEditorPanel.tsx (see its `KINDS` array): desk, exec_desk, chair, partition, meeting_table, cabinet, printer, plant, pantry_counter, whiteboard. Each entry `{file, image, fit}` is a hand-picked representative Office single (see SPRITE_PICKS in the sync script) so furniture placed by kind alone still renders a real image instead of a color block. `catalog` — array of every scanned single-item PNG (5800+ entries): `{id, label, file, image, kind, category, categoryLabel, fit}`. `id` is globally unique — \"office-<N>\" (unpadded) for the Office source, \"<category>-<NNN>\" (3-digit zero-padded) for each of the 24 Interiors theme-sorter categories. `kind` is one of the same 10 LayoutKind values (inferred per-item for Office via number ranges; a fixed per-category default for theme items, since there's no reliable per-item heuristic across 24 unrelated vendor numbering schemes). `category`/`categoryLabel` are the machine slug (e.g. \"kitchen\") and 繁中 label (e.g. \"廚房\") used for the frontend's category browser. `categories` — array of `{slug, label, count}`, one per category actually found in the scanned package (\"office\" plus however many of the 24 Interiors theme folders exist on disk — ADR-003 documented 26 but only 24 exist in the purchased package; folders \"1_\" and \"17_\" are absent, see the sync script's THEME_CATEGORIES comment). Any other top-level keys (`generatedFrom`, `generatedAt`) are informational only.",
   "sprites": {
     "desk": {
-      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_210.png",
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_210.png",
+      "image": "/tilesets/limezu-modern-office/Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_210.png",
       "fit": "contain"
     },
     "exec_desk": {
-      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_245.png",
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_245.png",
+      "image": "/tilesets/limezu-modern-office/Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_245.png",
       "fit": "contain"
     },
     "chair": {
-      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_101.png",
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_101.png",
+      "image": "/tilesets/limezu-modern-office/Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_101.png",
       "fit": "contain"
     },
     "partition": {
-      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_010.png",
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_10.png",
+      "image": "/tilesets/limezu-modern-office/Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_10.png",
       "fit": "contain"
     },
     "meeting_table": {
-      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_188.png",
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_188.png",
+      "image": "/tilesets/limezu-modern-office/Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_188.png",
       "fit": "contain"
     },
     "cabinet": {
-      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_120.png",
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_120.png",
+      "image": "/tilesets/limezu-modern-office/Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_120.png",
       "fit": "contain"
     },
     "printer": {
-      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_147.png",
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_147.png",
+      "image": "/tilesets/limezu-modern-office/Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_147.png",
       "fit": "contain"
     },
     "plant": {
-      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_098.png",
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_98.png",
+      "image": "/tilesets/limezu-modern-office/Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_98.png",
       "fit": "contain"
     },
     "pantry_counter": {
-      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_165.png",
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_165.png",
+      "image": "/tilesets/limezu-modern-office/Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_165.png",
       "fit": "contain"
     },
     "whiteboard": {
-      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_169.png",
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_169.png",
+      "image": "/tilesets/limezu-modern-office/Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_169.png",
       "fit": "contain"
     }
-  }
+  },
+  "catalog": [
+    {
+      "id": "office-1",
+      "label": "辦公室 1",
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_1.png",
+      "image": "/tilesets/limezu-modern-office/Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/Modern_Office_Singles_32x32_1.png",
+      "kind": "partition",
+      "category": "office",
+      "categoryLabel": "辦公室",
+      "fit": "contain"
+    },
+    {
+      "id": "kitchen-001",
+      "label": "廚房 001",
+      "file": "moderninteriors-win/1_Interiors/32x32/Theme_Sorter_Singles_32x32/12_Kitchen_Singles_32x32/Kitchen_Singles_32x32_1.png",
+      "image": "/tilesets/limezu-modern-office/moderninteriors-win/1_Interiors/32x32/Theme_Sorter_Singles_32x32/12_Kitchen_Singles_32x32/Kitchen_Singles_32x32_1.png",
+      "kind": "cabinet",
+      "category": "kitchen",
+      "categoryLabel": "廚房",
+      "fit": "contain"
+    }
+  ],
+  "categories": [
+    { "slug": "office", "label": "辦公室", "count": 339 },
+    { "slug": "kitchen", "label": "廚房", "count": 408 },
+    { "slug": "conference_hall", "label": "會議廳", "count": 68 }
+  ]
 }
