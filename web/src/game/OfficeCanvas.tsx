@@ -467,7 +467,22 @@ export default function OfficeCanvas() {
       let mapTilesH = VIEWPORT_TILES_H;
       let zoom = 1;
 
-      const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+      // W3 fix: ZOOM_MIN=0.5 was a hardcoded floor that couldn't zoom out
+      // far enough to fit a room bigger than the 48x32 baseline (legal
+      // room sizes go up to 96x96 — see office_shell_core MAX_SIZE) — both
+      // "fit to map" and manual wheel-zoom-out got stuck unable to show
+      // the whole room. The effective floor is now whichever is SMALLER:
+      // the original 0.5 floor, or the zoom level that exactly fits the
+      // current map in the viewport (so "fit" is always reachable and
+      // never clamped away).
+      function fitZoomFor(tilesW: number, tilesH: number) {
+        return Math.min(VIEWPORT_W / (tilesW * TILE), VIEWPORT_H / (tilesH * TILE));
+      }
+
+      const clampZoom = (z: number) => {
+        const zoomMin = Math.min(ZOOM_MIN, fitZoomFor(mapTilesW, mapTilesH));
+        return Math.min(ZOOM_MAX, Math.max(zoomMin, z));
+      };
 
       function clampCamera() {
         const scaledW = mapTilesW * TILE * zoom;
@@ -497,9 +512,7 @@ export default function OfficeCanvas() {
       }
 
       function fitView() {
-        zoom = clampZoom(
-          Math.min(VIEWPORT_W / (mapTilesW * TILE), VIEWPORT_H / (mapTilesH * TILE))
-        );
+        zoom = clampZoom(fitZoomFor(mapTilesW, mapTilesH));
         camera.scale.set(zoom);
         clampCamera();
       }
@@ -514,7 +527,16 @@ export default function OfficeCanvas() {
       oneToOneViewRef.current = oneToOneView;
 
       function isEditingNow() {
-        return useGameStore.getState().world?.status === "editing";
+        // W1/W4 fix: read the store's local-only `editorActive` flag
+        // instead of `world.status === "editing"` — the latter gets
+        // clobbered by any incoming world_snapshot (see store.ts).
+        // Tab-aware (指揮官裁決 2026-07-12): the camera lock + grid only
+        // apply while the editor tab is actually fronted. An open draft on
+        // a background tab keeps `editorActive` true (W1's draft lifecycle
+        // is untouched) but must not freeze the monitor tab's wheel/drag
+        // nor overlay its cyan grid.
+        const state = useGameStore.getState();
+        return state.editorActive && state.activeTab === "editor";
       }
 
       function screenPointFromClient(clientX: number, clientY: number) {
@@ -662,6 +684,17 @@ export default function OfficeCanvas() {
       if (MOCK_MODE) {
         try {
           initialTmj = await (await fetch("/maps/office_shell.tmj")).json();
+          // W7 fix: the live branch (fetchLiveMap) populates the store's
+          // mapTmj/mapRev as a side effect; this mock branch fetched the
+          // tmj but never told the store, so mapTmj stayed `null` forever
+          // in mock mode — world settings showed the fallback dims and
+          // wall-overlap validation silently skipped. Mirror fetchLiveMap
+          // here too.
+          if (initialTmj) {
+            useGameStore
+              .getState()
+              .setMap(initialTmj, useGameStore.getState().world?.map_rev ?? 1);
+          }
         } catch (err) {
           console.warn("[sim] failed to load mock map", err);
         }
@@ -883,10 +916,22 @@ export default function OfficeCanvas() {
           });
         }
       };
+      // Same tab-aware condition as isEditingNow(): the grid/cursor only
+      // reflect edit mode while the editor tab is fronted. Tab switches
+      // update store.activeTab, which fires this subscriber, so leaving/
+      // re-entering the editor tab redraws/clears the grid immediately.
       const initial = useGameStore.getState();
-      applyState(initial.layout, initial.agents, initial.world?.status === "editing");
+      applyState(
+        initial.layout,
+        initial.agents,
+        initial.editorActive && initial.activeTab === "editor"
+      );
       unsubscribe = useGameStore.subscribe((state) => {
-        applyState(state.layout, state.agents, state.world?.status === "editing");
+        applyState(
+          state.layout,
+          state.agents,
+          state.editorActive && state.activeTab === "editor"
+        );
         // ADR-002 D2: a world_snapshot whose world.map_rev outran the
         // cached mapRev means /world/map changed under us — refetch and
         // rebuild mapLayer. No-op in mock mode / while already fetching /

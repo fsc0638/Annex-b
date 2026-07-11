@@ -15,7 +15,6 @@ import {
   type AgentRow,
   type LayoutItemRow,
   type LayoutValidation,
-  type WorldMeta,
   type WorldSnapshotMsg,
 } from "@/game/types";
 import {
@@ -137,6 +136,15 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
   const validation = useGameStore((state) => state.layoutValidation);
   const running = useGameStore((state) => state.running);
   const mapTmj = useGameStore((state) => state.mapTmj);
+  const conn = useGameStore((state) => state.conn);
+  // W1 fix: editorActive is the store's local-only "editor is open" flag —
+  // never touched by applyServerMsg/world_snapshot (see store.ts). This is
+  // the sole source of "am I editing" for both this panel and OfficeCanvas.
+  const editorActive = useGameStore((state) => state.editorActive);
+  const setEditorActive = useGameStore((state) => state.setEditorActive);
+  // worldSnapshotSeq bumps on every processed world_snapshot; compared
+  // against a per-draft baseline to show a staleness notice (W1).
+  const worldSnapshotSeq = useGameStore((state) => state.worldSnapshotSeq);
 
   const [localLayout, setLocalLayout] = useState<LayoutItemRow[] | null>(null);
   // Desk assignments (the "座位指派" section below): the real engine has
@@ -154,7 +162,6 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
   const [message, setMessage] = useState<string | null>(null);
   const [autoView, setAutoView] = useState(true);
   const [lockedViewBounds, setLockedViewBounds] = useState<ViewBounds | null>(null);
-  const [localEditing, setLocalEditing] = useState(false);
   const [furnitureSprites, setFurnitureSprites] =
     useState<FurnitureSpriteCatalog | null>(null);
   const [furnitureMaterials, setFurnitureMaterials] = useState<FurnitureMaterial[]>([]);
@@ -172,14 +179,35 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
   const interactionRef = useRef<BoardInteraction | null>(null);
   const draftBaseLayoutRef = useRef<LayoutItemRow[] | null>(null);
   const draftBaseAgentsRef = useRef<Record<string, AgentRow> | null>(null);
-  const draftBaseWorldStatusRef = useRef<WorldMeta["status"] | null>(null);
   const draftBaseRunningRef = useRef<boolean | null>(null);
+  // W1: baseline worldSnapshotSeq captured when the current draft started,
+  // so we can tell whether a world_snapshot has landed since (staleness
+  // notice) without ever touching editorActive from that snapshot.
+  const draftBaseSnapshotSeqRef = useRef<number | null>(null);
 
-  const editing = world?.status === "editing" || localEditing;
-  const localOnly = localEditing || send === null;
+  const editing = editorActive;
+  // W8 fix: this used to be `localEditing || send === null`, where
+  // `localEditing` was a one-way latch set true only if `send` happened to
+  // be null at the moment "編輯模式" was clicked. Once latched it never
+  // reset, so an edit session started in a brief disconnect window stayed
+  // "local preview only" forever even after the socket reconnected. There
+  // is no latch anymore — `localOnly` is recomputed from the *current*
+  // `send`/`conn` every render (and thus fresh again inside `save()`).
+  // `conn === "mock"` is kept explicit so true mock mode's read-only/local
+  // behavior can never regress even if the local `send` prop wiring changes.
+  const localOnly = conn === "mock" || send === null;
   // send === null covers both mock mode and "not connected yet" — either
   // way there is no engine to PUT world settings to.
   const mockMode = send === null;
+  // W1: a snapshot arrived after this draft began (external state moved
+  // out from under an in-progress, unsaved edit) — the draft is kept
+  // (never silently wiped), but we surface this so the user knows a save
+  // will still be validated against the engine's current truth.
+  const staleDraft =
+    editing &&
+    localLayout !== null &&
+    draftBaseSnapshotSeqRef.current !== null &&
+    worldSnapshotSeq !== draftBaseSnapshotSeqRef.current;
   const rows = localLayout ?? layout;
   const agentsList = useMemo(
     () => Object.values(agents).sort((a, b) => a.name.localeCompare(b.name, "zh-Hant")),
@@ -221,9 +249,8 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
     if (draftBaseLayoutRef.current) return;
     draftBaseLayoutRef.current = cloneLayout(layout);
     draftBaseAgentsRef.current = cloneAgents(agents);
-    draftBaseWorldStatusRef.current = world?.status ?? null;
     draftBaseRunningRef.current = running;
-  }, [agents, layout, running, world?.status]);
+  }, [agents, layout, running]);
 
   useEffect(() => {
     let cancelled = false;
@@ -239,7 +266,19 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
         return response.json();
       })
       .then((manifest: FurnitureSpriteManifest | null) => {
-        if (cancelled || !manifest?.sprites) return;
+        if (cancelled) return;
+        // W5 fix: `manifest === null` means the earlier !response.ok branch
+        // already set "missing" above — nothing more to do. But a 200 with
+        // valid JSON that's simply the WRONG shape (no `sprites` object)
+        // fell through here silently before this fix, leaving
+        // manifestStatus stuck at "loading" forever (so the install-
+        // guidance banner never appeared). Treat that shape mismatch the
+        // same as a fetch failure: "missing".
+        if (manifest === null) return;
+        if (!manifest.sprites) {
+          setManifestStatus("missing");
+          return;
+        }
         const catalog: FurnitureSpriteCatalog = {};
         for (const [value, sprite] of Object.entries(manifest.sprites)) {
           if (isLayoutKind(value) && sprite.image) {
@@ -301,9 +340,17 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
   }, [mapTmj, mapDims, activeThemeId]);
 
   useEffect(() => {
+    // Belt-and-suspenders mirror of enterEdit/cancelEdit's own draft
+    // setup/teardown, for the (currently unused but type-legal) case of
+    // `editorActive` flipping true some other way than this panel's own
+    // buttons. Since `editing` now derives solely from the store-local
+    // `editorActive` flag (W1 fix) — never from `world.status`, which a
+    // world_snapshot can change at any time — this effect no longer fires
+    // spuriously when an unrelated snapshot arrives mid-edit.
     if (editing && localLayout === null) {
       const draft = cloneLayout(layout);
       rememberDraftBase();
+      draftBaseSnapshotSeqRef.current = useGameStore.getState().worldSnapshotSeq;
       setLocalLayout(draft);
       publishDraftLayout(draft);
       setAssignments(
@@ -316,15 +363,21 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
     if (!editing && localLayout !== null) {
       setLocalLayout(null);
       setSelectedId("");
+      draftBaseSnapshotSeqRef.current = null;
     }
   }, [agents, editing, layout, localLayout, rememberDraftBase]);
 
   function publishDraftLayout(nextLayout: LayoutItemRow[]) {
-    useGameStore.setState((state) => ({
-      layout: nextLayout,
-      world: state.world ? { ...state.world, status: "editing" } : state.world,
-      running: false,
-    }));
+    // W1 fix: this used to also stamp `world.status = "editing"` here and
+    // rely on that as the "am I editing" flag — but `world` is fully
+    // replaced by every world_snapshot, so any snapshot arriving while
+    // editing (another client's action, a curl PATCH, a reconnect) flipped
+    // status back and, via the cleanup effect above, silently wiped
+    // `localLayout`. The draft flag now lives only in `editorActive`
+    // (store-local, set explicitly by enterEdit/cancelEdit). This still
+    // writes `layout` so OfficeCanvas's live preview keeps working, and
+    // still pauses `running` while a draft is being edited.
+    useGameStore.setState({ layout: nextLayout, running: false });
   }
 
   function updateDraftLayout(
@@ -341,22 +394,16 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
   function restoreDraftBase() {
     const baseLayout = draftBaseLayoutRef.current;
     const baseAgents = draftBaseAgentsRef.current;
-    const baseStatus = draftBaseWorldStatusRef.current;
     const baseRunning = draftBaseRunningRef.current;
     if (baseLayout) {
       useGameStore.setState((state) => ({
         layout: baseLayout,
         agents: baseAgents ?? state.agents,
-        world:
-          state.world && baseStatus
-            ? { ...state.world, status: baseStatus }
-            : state.world,
         running: baseRunning ?? state.running,
       }));
     }
     draftBaseLayoutRef.current = null;
     draftBaseAgentsRef.current = null;
-    draftBaseWorldStatusRef.current = null;
     draftBaseRunningRef.current = null;
   }
 
@@ -365,6 +412,10 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
     draftBaseAgentsRef.current = Object.fromEntries(
       nextAgents.map((agent) => [agent.id, { ...agent }])
     );
+    // Re-baseline the staleness check too: whatever we just committed IS
+    // current as of now, so an already-seen snapshot shouldn't keep
+    // showing the "world moved on" notice.
+    draftBaseSnapshotSeqRef.current = useGameStore.getState().worldSnapshotSeq;
   }
 
   const disabled = !world;
@@ -373,6 +424,7 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
     if (!world) return;
     setMessage(null);
     rememberDraftBase();
+    draftBaseSnapshotSeqRef.current = useGameStore.getState().worldSnapshotSeq;
     const draft = cloneLayout(layout);
     setLocalLayout(draft);
     publishDraftLayout(draft);
@@ -382,20 +434,24 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
         desk_id: agent.desk_id,
       }))
     );
-    if (send) {
-      send({ type: "control", action: "enter_edit" });
-    } else {
-      setLocalEditing(true);
-    }
+    // W1 fix: editing is now tracked purely client-side via
+    // `editorActive` (never derived from `world.status`).
+    setEditorActive(true);
+    // W2 fix: enter_edit/exit_edit ws control messages are answered by the
+    // engine with "edit mode is not implemented until Phase 3" (see
+    // engine/crates/api-server/src/ws.rs) — a misleading error toast for a
+    // feature the REST-based editor (ADR-002 D2) has already fully
+    // replaced. Removed; there is nothing left for the engine to do here.
   }
 
   function cancelEdit() {
     setMessage(null);
     setLocalLayout(null);
     setSelectedId("");
-    setLocalEditing(false);
+    draftBaseSnapshotSeqRef.current = null;
+    setEditorActive(false);
     restoreDraftBase();
-    if (send) send({ type: "control", action: "exit_edit" });
+    // W2 fix: see enterEdit — no exit_edit ws send either.
   }
 
   function updateSelected(patch: Partial<LayoutItemRow>) {
@@ -648,7 +704,17 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
 
   async function save() {
     if (!world || !localLayout) return;
-    const localValidation = validateLocalLayout(localLayout, mapTmj, mapDims.w, mapDims.h);
+    // W6: pass the store's live `agents` (their persisted `desk_id`, which
+    // is what the engine's build_agent_sims actually resolves seating
+    // from) so a desk missing its `-chair` can be judged error-vs-warning
+    // by whether it's actually assigned to someone.
+    const localValidation = validateLocalLayout(
+      localLayout,
+      mapTmj,
+      mapDims.w,
+      mapDims.h,
+      agents
+    );
     useGameStore.setState({ layoutValidation: localValidation });
     if (!localValidation.ok) {
       setMessage("本地校驗發現錯誤，請先修正下方標紅項目再套用/儲存");
@@ -696,7 +762,6 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
         body: JSON.stringify({ items: localLayout }),
       });
       useGameStore.getState().applyServerMsg(response);
-      commitDraftBase(response.layout, response.agents);
       useGameStore.setState((state) => ({
         layoutValidation: {
           ok: true,
@@ -705,6 +770,17 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
         },
       }));
       setMessage("佈局已儲存（模擬已重置至 07:00 暫停）");
+      // W1: a successful engine save is one of the only two legitimate
+      // ways to clear an in-progress draft (the other is the user hitting
+      // "取消") — exit editing now instead of leaving a stale draft/edit
+      // session open on top of the freshly-applied snapshot above.
+      setLocalLayout(null);
+      setSelectedId("");
+      draftBaseLayoutRef.current = null;
+      draftBaseAgentsRef.current = null;
+      draftBaseRunningRef.current = null;
+      draftBaseSnapshotSeqRef.current = null;
+      setEditorActive(false);
     } catch (error) {
       setMessage(null);
       const text =
@@ -791,7 +867,12 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
               onClick={save}
               className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-600"
             >
-              {localOnly ? "套用預覽" : "儲存"}
+              {/* W8: label reflects the *current*, dynamically-recomputed
+                  localOnly (see its definition above) rather than a latched
+                  flag — so it correctly flips to "儲存至引擎" once a real
+                  PUT becomes available, even if edit mode was entered while
+                  disconnected. */}
+              {localOnly ? "套用預覽" : "儲存至引擎"}
             </button>
             <button
               type="button"
@@ -1208,8 +1289,18 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
         </div>
       </div>
 
-      {(message || validation) && (
+      {(message || validation || staleDraft) && (
         <div className="mt-3 rounded-md border border-slate-800 bg-slate-950 p-2 text-xs text-slate-300">
+          {/* W1: a world_snapshot landed while this draft was open. The
+              draft itself is never discarded for this reason — only the
+              user's "取消" or a successful save clears it — but the user
+              should know a save will still be validated against whatever
+              the engine's current state now is. */}
+          {staleDraft && (
+            <div className="text-amber-300">
+              世界已被其他操作更新，你的草稿基於較舊狀態，儲存時仍會經引擎驗證
+            </div>
+          )}
           {message && <div>{message}</div>}
           {validation?.errors.map((error) => (
             <div key={error} className="text-rose-300">{error}</div>
@@ -1705,18 +1796,23 @@ function blockedTileLookup(
  * catch the common mistakes before the round trip:
  *  - errors: footprint outside the map, or overlapping a wall/window tile
  *    (both are hard `PUT /world/layout` 422 causes — see
- *    engine/crates/sim-core/src/grid.rs::validate_layout_within_map).
+ *    engine/crates/sim-core/src/grid.rs::validate_layout_within_map); also
+ *    (W6 fix) a desk with no matching "<key>-chair" IF that desk is
+ *    actually some agent's assigned seat (`agents[*].desk_id === desk.id`)
+ *    — world.rs::build_agent_sims resolves that agent's chair from the
+ *    desk and 422s the WHOLE payload when it can't, so this is a real
+ *    save-blocking condition, not a cosmetic one.
  *  - warnings: two non-walkable items overlapping each other, or a desk
- *    with no matching "<key>-chair" (mirrors world.rs::build_agent_sims'
- *    desk->chair resolution — not fatal here since it only breaks seating
- *    for whichever agent is assigned to that desk, not the save itself).
+ *    with no matching "<key>-chair" that nobody is currently assigned to
+ *    (only breaks seating for a future assignment, not this save).
  * The engine remains the source of truth: a 422 it returns anyway is
  * surfaced verbatim (see `save()`), this is purely a fail-fast UX layer. */
 function validateLocalLayout(
   items: LayoutItemRow[],
   mapTmj: unknown,
   mapW: number,
-  mapH: number
+  mapH: number,
+  agents: Record<string, AgentRow>
 ): LayoutValidation {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -1755,10 +1851,24 @@ function validateLocalLayout(
   }
 
   const chairKeys = new Set(items.filter((item) => item.kind === "chair").map((item) => item.key));
+  // W6: a desk id currently assigned as some agent's persisted desk_id —
+  // that's exactly what the engine's build_agent_sims resolves seating
+  // from on `PUT /world/layout`, so a missing chair for one of THESE desks
+  // is a real 422 risk, not just a future-seating inconvenience.
+  const assignedDeskIds = new Set(
+    Object.values(agents)
+      .map((agent) => agent.desk_id)
+      .filter((deskId): deskId is string => deskId !== null)
+  );
   for (const desk of items.filter((item) => item.kind === "desk" || item.kind === "exec_desk")) {
-    if (!chairKeys.has(`${desk.key}-chair`)) {
+    if (chairKeys.has(`${desk.key}-chair`)) continue;
+    if (assignedDeskIds.has(desk.id)) {
+      errors.push(
+        `「${desk.name}」(${desk.key}) 沒有對應椅子 '${desk.key}-chair'，且已有角色指派到此桌——儲存至引擎會被拒絕（422）`
+      );
+    } else {
       warnings.push(
-        `「${desk.name}」(${desk.key}) 沒有對應椅子 '${desk.key}-chair'，指派到此桌的角色可能無法入座`
+        `「${desk.name}」(${desk.key}) 沒有對應椅子 '${desk.key}-chair'，之後指派到此桌的角色可能無法入座`
       );
     }
   }

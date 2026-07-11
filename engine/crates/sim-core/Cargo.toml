@@ -15,4 +15,7 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+# Fixture-mode persist load path (persist.rs) warns and skips a single
+# agent's invalid llm_profile override without dropping the whole save.
+tracing.workspace = true
 sqlx = { workspace = true, optional = true }

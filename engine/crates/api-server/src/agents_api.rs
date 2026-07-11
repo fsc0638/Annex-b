@@ -4,10 +4,9 @@
 //! broadcasts a full `world_snapshot` (see D2's shared broadcast pattern
 //! in `world_api.rs`).
 
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::Json;
-use llm_gateway::provider::ProviderId;
 use serde_json::Value;
 use sim_core::world::AgentPatch;
 use uuid::Uuid;
@@ -19,9 +18,14 @@ use crate::world_api::persist_fixture;
 
 pub async fn patch_agent(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    // Taken as a `Result` so an unparseable `:id` (not a UUID) becomes this
+    // crate's JSON error envelope instead of Axum's default plaintext 400
+    // that the `Path<Uuid>` extractor would emit before the handler runs.
+    id: Result<Path<Uuid>, PathRejection>,
     body: Result<Json<AgentPatch>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    let Path(id) =
+        id.map_err(|e| ApiError::bad_request(format!("invalid agent id in path: {e}")))?;
     let sim = state.sim.clone().ok_or_else(|| {
         ApiError::service_unavailable("world not loaded (check WORLD_SOURCE / DATABASE_URL)")
     })?;
@@ -63,51 +67,14 @@ pub async fn patch_agent(
     Ok(Json(snapshot))
 }
 
-/// Validates `llm_profile` per ADR-002 D5: must be a JSON object; every key
-/// must be one of L1/L2/L3 (L0 is never overridable — spec 6.1 v2.1); every
-/// value must be a `"provider:model"` string with a known provider and a
-/// non-empty model. Unlike `llm_gateway::tier::resolve_tier_target` (which
-/// silently falls back to the tier default on malformed input, appropriate
-/// for a hot runtime path), this is a validation gate for user-submitted
-/// data — malformed input here is a loud 422, not a silent fallback.
+/// Validates `llm_profile` per ADR-002 D5, delegating to the shared rule in
+/// `sim_core::llm_profile` (the single source of truth also used by the
+/// fixture-mode persist load path) and mapping its message into this crate's
+/// 422 envelope. Malformed input here is a loud 422, not a silent fallback
+/// (unlike `llm_gateway::tier::resolve_tier_target`, whose hot-path job is to
+/// fall back to the tier default).
 fn validate_llm_profile(v: &Value) -> Result<(), ApiError> {
-    let obj = v
-        .as_object()
-        .ok_or_else(|| ApiError::unprocessable("llm_profile must be a JSON object"))?;
-    for (key, val) in obj {
-        match key.as_str() {
-            "L1" | "L2" | "L3" => {}
-            "L0" => {
-                return Err(ApiError::unprocessable(
-                    "llm_profile must not override L0 (spec 6.1: L0 is pinned, never overridable)",
-                ))
-            }
-            other => {
-                return Err(ApiError::unprocessable(format!(
-                    "llm_profile: unknown tier key '{other}' (allowed: L1, L2, L3)"
-                )))
-            }
-        }
-        let s = val.as_str().ok_or_else(|| {
-            ApiError::unprocessable(format!("llm_profile.{key} must be a string"))
-        })?;
-        let (provider, model) = s.split_once(':').ok_or_else(|| {
-            ApiError::unprocessable(format!(
-                "llm_profile.{key} must be formatted as \"provider:model\", got '{s}'"
-            ))
-        })?;
-        if ProviderId::parse(provider).is_none() {
-            return Err(ApiError::unprocessable(format!(
-                "llm_profile.{key}: unknown provider '{provider}'"
-            )));
-        }
-        if model.is_empty() {
-            return Err(ApiError::unprocessable(format!(
-                "llm_profile.{key}: model must not be empty"
-            )));
-        }
-    }
-    Ok(())
+    sim_core::llm_profile::validate_llm_profile(v).map_err(ApiError::unprocessable)
 }
 
 #[cfg(test)]

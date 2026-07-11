@@ -30,6 +30,7 @@ pub mod db;
 pub mod events;
 pub mod fixture;
 pub mod grid;
+pub mod llm_profile;
 pub mod pathfind;
 pub mod persist;
 pub mod tilemap;

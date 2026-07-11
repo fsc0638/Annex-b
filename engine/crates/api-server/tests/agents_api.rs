@@ -161,6 +161,37 @@ async fn patch_agent_rejects_duplicate_name_with_422() {
         .contains("already used"));
 }
 
+/// R4 regression: an unparseable `:id` in the path must return this crate's
+/// JSON error envelope (`{"error":{...}}`) with a 400, not Axum's default
+/// plaintext `Path` rejection. Before the handler took
+/// `Result<Path<Uuid>, PathRejection>`, the `Path<Uuid>` extractor rejected
+/// the request before the handler ran, producing a bare text/plain 400 body.
+#[tokio::test]
+async fn patch_agent_returns_json_envelope_400_for_invalid_uuid() {
+    let (state, _handle) = test_state();
+    let app = build_router(state);
+
+    let body = serde_json::json!({ "reply_style": "x" }).to_string();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/v1/agents/not-a-uuid")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "bad_request");
+    assert!(
+        json["error"]["message"].is_string(),
+        "must be the JSON error envelope, not Axum's plaintext rejection: {json}"
+    );
+}
+
 #[tokio::test]
 async fn patch_agent_returns_404_for_unknown_id() {
     let (state, _handle) = test_state();

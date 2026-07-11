@@ -14,6 +14,12 @@ import type {
 
 export type ConnState = "connecting" | "open" | "closed" | "mock";
 
+/** The main shell's three tabs (app/page.tsx). Mirrored into the store so
+ * OfficeCanvas — whose camera handlers live outside React's render tree —
+ * can make the edit-mode camera lock tab-aware: the cyan grid + wheel/drag
+ * no-op only apply while the editor tab itself is fronted. */
+export type AppTab = "monitor" | "editor" | "agents";
+
 export interface GameState {
   conn: ConnState;
   world: WorldMeta | null;
@@ -37,11 +43,37 @@ export interface GameState {
    * snapshot that hasn't changed the map yet. */
   mapRev: number;
 
+  /** Client-local "the layout editor is open" flag (W1 fix). This is
+   * DELIBERATELY not derived from `world.status` — a `world_snapshot` can
+   * arrive at any time (another client's action, a PATCH from curl, a
+   * reconnect) and fully replaces `world`, which used to silently flip an
+   * `editing` derived-from-status flag back to false and (via
+   * LayoutEditorPanel's cleanup effect) wipe an in-progress unsaved draft.
+   * `applyServerMsg` must NEVER write this field — only
+   * `setEditorActive` (called explicitly by LayoutEditorPanel on
+   * enter/cancel/save-success) may change it. */
+  editorActive: boolean;
+  /** Increments once per processed `world_snapshot`. Lets LayoutEditorPanel
+   * detect "a snapshot landed while I have an unsaved draft" (to show a
+   * staleness notice) without touching `editorActive`. */
+  worldSnapshotSeq: number;
+  /** Which main-shell tab is currently fronted (mirrors app/page.tsx's own
+   * tab state via `setActiveTab`). Client-local UI state:
+   * `applyServerMsg` must NEVER write this field. Switching tabs does not
+   * touch `editorActive` either — an open draft survives tab switches;
+   * this flag only scopes OfficeCanvas's grid/camera-lock to the editor
+   * tab being the one actually on screen. */
+  activeTab: AppTab;
+
   setConn: (c: ConnState) => void;
   applyServerMsg: (msg: ServerMsg) => void;
   clearError: () => void;
   /** Called by OfficeCanvas after a successful `GET /api/v1/world/map`. */
   setMap: (tmj: unknown, rev: number) => void;
+  /** Called only by LayoutEditorPanel — see `editorActive` above. */
+  setEditorActive: (active: boolean) => void;
+  /** Called only by app/page.tsx's tab bar — see `activeTab` above. */
+  setActiveTab: (tab: AppTab) => void;
 }
 
 export const useGameStore = create<GameState>((set) => ({
@@ -56,10 +88,15 @@ export const useGameStore = create<GameState>((set) => ({
   layoutValidation: null,
   mapTmj: null,
   mapRev: 1,
+  editorActive: false,
+  worldSnapshotSeq: 0,
+  activeTab: "monitor",
 
   setConn: (c) => set({ conn: c }),
   clearError: () => set({ lastError: null }),
   setMap: (tmj, rev) => set({ mapTmj: tmj, mapRev: rev }),
+  setEditorActive: (active) => set({ editorActive: active }),
+  setActiveTab: (tab) => set({ activeTab: tab }),
 
   applyServerMsg: (msg) =>
     set((state) => {
@@ -74,6 +111,11 @@ export const useGameStore = create<GameState>((set) => ({
             workItems: msg.work_items ?? [],
             running: msg.world.status === "running",
             speed: msg.world.speed ?? 1,
+            // NOTE: `editorActive` is intentionally absent from this
+            // return — a world_snapshot must never touch it (see the
+            // field's doc comment above). worldSnapshotSeq bumps so
+            // LayoutEditorPanel can notice a snapshot landed mid-draft.
+            worldSnapshotSeq: state.worldSnapshotSeq + 1,
           };
         }
         case "layout_updated": {

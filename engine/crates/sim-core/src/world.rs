@@ -245,6 +245,57 @@ impl WorldState {
         Ok(())
     }
 
+    /// Replaces the map AND the layout together in one atomic step, used
+    /// when a save file (ADR-002 D3 fixture-mode load) changes *both* the
+    /// tmj and the layout — a legitimate pairing such as shrinking the room
+    /// and compacting the furniture together, or growing the room and
+    /// spreading furniture into the newly-available space.
+    ///
+    /// The single-field [`Self::replace_map`] / [`Self::replace_layout`]
+    /// cannot express this pairing without passing through an inconsistent
+    /// intermediate state: `replace_map` validates the *new* map against the
+    /// still-*old* layout (and vice versa), so a paired shrink/grow that is
+    /// valid as a whole is rejected because neither half is valid against the
+    /// other's stale counterpart. This method validates the new layout
+    /// against the new map directly — the only pairing that ever exists — and
+    /// commits every field in one shot, so no observer (a racing `step()`, a
+    /// broadcast snapshot) can ever see a mismatched map/layout pair.
+    ///
+    /// Revision semantics match [`Self::replace_map`]: the map changed, so
+    /// `map_rev` bumps and the world resets to day-start paused.
+    pub fn replace_map_and_layout(
+        &mut self,
+        tmj_str: &str,
+        new_layout: Vec<LayoutItem>,
+    ) -> Result<(), String> {
+        // Build + validate the NEW map (same shape rules as replace_map).
+        let map_json: serde_json::Value =
+            serde_json::from_str(tmj_str).map_err(|e| format!("tmj: invalid JSON: {e}"))?;
+        let map = TileMap::from_tmj_value(&map_json)?;
+        map.validate_shape()?;
+        // Validate the NEW layout against the NEW map (never the stale one).
+        validate_layout_within_map(&map, &new_layout).map_err(|e| {
+            let (min_w, min_h) = suggested_min_size(&new_layout);
+            format!(
+                "{e}; 最小可行尺寸提示：至少 {min_w}x{min_h}（依現有家具＋牆環外框推算，先擴大房間或先搬移/刪除家具再縮小）"
+            )
+        })?;
+        // Re-resolve every agent's desk/chair against the NEW layout via the
+        // same rules from_parts/replace_layout enforce (chair one-to-one …).
+        let agents: Vec<Agent> = self.agents.iter().map(|a| a.agent.clone()).collect();
+        let sims = Self::build_agent_sims(agents, &new_layout)?;
+        let grid = CollisionGrid::from_map_and_layout(&map, &new_layout);
+        // Commit atomically — all-or-nothing, no mismatched intermediate.
+        self.map = map;
+        self.map_json = map_json;
+        self.layout = new_layout;
+        self.grid = grid;
+        self.agents = sims;
+        self.map_rev += 1;
+        self.reset_to_day_start();
+        Ok(())
+    }
+
     /// Applies a partial update to one agent (ADR-002 D5 `PATCH
     /// /api/v1/agents/:id`). Does NOT reset the world or touch position —
     /// only the four editable fields plus `llm_profile` (format/tier

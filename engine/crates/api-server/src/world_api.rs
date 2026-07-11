@@ -124,10 +124,21 @@ pub async fn put_layout(
 /// succeeded and was already broadcast; losing the save-to-disk step just
 /// means a restart would fall back to the last successfully-persisted
 /// state (or the seed fixture) instead of this one, not a request failure.
+///
+/// Only the cheap in-memory snapshot ([`build_save_file`]) runs under the
+/// world lock; the lock is released before the (serialize + temp-file +
+/// rename) disk write, so a slow filesystem never blocks other request
+/// handlers or the tick loop waiting on the world lock. Persistence is still
+/// awaited before the caller returns its HTTP response — the save-before-
+/// respond ordering is unchanged; only the lock hold time shrinks.
 pub(crate) async fn persist_fixture(sim: &Arc<SimHandle>) {
-    let world = sim.world.lock().await;
+    let save = {
+        let world = sim.world.lock().await;
+        sim_core::persist::build_save_file(&world)
+        // world lock released here, before any filesystem I/O.
+    };
     let path = sim_core::persist::save_path_from_env();
-    if let Err(e) = sim_core::persist::save_to_path(&world, &path) {
+    if let Err(e) = sim_core::persist::save_file_to_path(&save, &path) {
         tracing::warn!(error = %e, path, "failed to persist world save file");
     }
 }

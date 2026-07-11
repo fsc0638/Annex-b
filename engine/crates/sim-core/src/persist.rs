@@ -18,6 +18,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::llm_profile::validate_llm_profile;
 use crate::world::{AgentPatch, WorldState};
 use crate::LayoutItem;
 
@@ -76,10 +77,21 @@ pub fn build_save_file(ws: &WorldState) -> WorldSaveFile {
 }
 
 /// Atomically writes (tmp file + rename) the world save file to `path`,
-/// creating parent directories as needed.
+/// creating parent directories as needed. Convenience wrapper that snapshots
+/// `ws` and writes in one call; callers that hold a lock over `ws` should
+/// instead [`build_save_file`] under the lock, release it, then call
+/// [`save_file_to_path`] so the disk I/O never runs under the world lock.
 pub fn save_to_path(ws: &WorldState, path: &str) -> std::io::Result<()> {
-    let save = build_save_file(ws);
-    let json = serde_json::to_string_pretty(&save).expect("save file always serializes");
+    save_file_to_path(&build_save_file(ws), path)
+}
+
+/// Atomically writes an already-built [`WorldSaveFile`] (tmp file + rename)
+/// to `path`, creating parent directories as needed. Split out from
+/// [`save_to_path`] so the (lock-free) serialization + disk write can happen
+/// after the world lock is released — only the cheap in-memory
+/// [`build_save_file`] snapshot needs the lock.
+pub fn save_file_to_path(save: &WorldSaveFile, path: &str) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(save).expect("save file always serializes");
     let path_ref = std::path::Path::new(path);
     if let Some(parent) = path_ref.parent() {
         std::fs::create_dir_all(parent)?;
@@ -104,17 +116,52 @@ pub fn save_to_path(ws: &WorldState, path: &str) -> std::io::Result<()> {
 /// `map_rev` — without this check, every server restart would bump
 /// `map_rev` even when no `PUT /world/map` ever happened, misleading a
 /// client that treats `map_rev` as "the map itself changed".
+///
+/// When *both* the tmj and the layout changed (a legitimate paired
+/// shrink/grow), the single-field `replace_map` then `replace_layout` path
+/// cannot be used: `replace_map` would validate the new map against the
+/// still-old layout (or vice versa) and reject a pairing that is valid as a
+/// whole, dropping the entire save. That case goes through the atomic
+/// [`WorldState::replace_map_and_layout`] instead, which validates the new
+/// layout against the new map directly. A map+layout change bumps `map_rev`
+/// (the map did change); an agent-only or layout-only save does not.
 pub fn apply_save_file(base: &WorldState, save: WorldSaveFile) -> Result<WorldState, String> {
     let mut ws = base.clone();
-    if save.tmj != base.map_json {
-        ws.replace_map(&save.tmj.to_string())?;
-    }
+    let map_changed = save.tmj != base.map_json;
     let layout_changed = serde_json::to_value(&save.layout_items).expect("layout serializes")
         != serde_json::to_value(&base.layout).expect("layout serializes");
-    if layout_changed {
-        ws.replace_layout(save.layout_items)?;
+    match (map_changed, layout_changed) {
+        // Paired map+layout change: must be atomic — never validate a new
+        // map against the stale layout or a new layout against the stale map.
+        (true, true) => ws.replace_map_and_layout(&save.tmj.to_string(), save.layout_items)?,
+        // Map only: the layout is unchanged, so validating the new map
+        // against the (identical) current layout is correct. Bumps map_rev.
+        (true, false) => ws.replace_map(&save.tmj.to_string())?,
+        // Layout only (e.g. a `PUT /world/layout`): validate against the
+        // unchanged current map. Does not bump map_rev.
+        (false, true) => ws.replace_layout(save.layout_items)?,
+        // Agent-only save (the common case): touch neither map nor layout,
+        // so map_rev is preserved.
+        (false, false) => {}
     }
     for ov in save.agents {
+        // Loading must apply the same llm_profile validation the API layer
+        // uses (a hand-edited save file could otherwise resurrect a profile
+        // `PATCH /agents/:id` would have rejected). On failure, warn and drop
+        // just this agent's override to defaults ("use tier defaults") —
+        // never reject the whole save file for one bad field.
+        let llm_profile = match validate_llm_profile(&ov.llm_profile) {
+            Ok(()) => ov.llm_profile,
+            Err(reason) => {
+                tracing::warn!(
+                    agent_id = %ov.id,
+                    reason = %reason,
+                    "world save has an invalid llm_profile override; clearing it for this agent \
+                     (other fields and agents are kept)"
+                );
+                serde_json::json!({})
+            }
+        };
         ws.patch_agent(
             ov.id,
             AgentPatch {
@@ -122,7 +169,7 @@ pub fn apply_save_file(base: &WorldState, save: WorldSaveFile) -> Result<WorldSt
                 seed_traits: Some(ov.seed_traits),
                 core_identity: Some(ov.core_identity),
                 reply_style: ov.reply_style,
-                llm_profile: Some(ov.llm_profile),
+                llm_profile: Some(llm_profile),
             },
         )?;
     }
@@ -249,5 +296,148 @@ mod tests {
         assert!(err.contains("invalid world save JSON"), "{err}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- R1: paired map+layout replace (atomic) -----------------------
+
+    /// A valid ring-of-walls `w x h` tmj with a bottom-center door, sized
+    /// for the D2 range (20..=96). Matches the helper in world.rs tests.
+    fn ring_tmj(w: i32, h: i32) -> String {
+        let (w, h) = (w as usize, h as usize);
+        let mut walls = vec![0i64; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
+                    walls[y * w + x] = 2;
+                }
+            }
+        }
+        walls[(h - 1) * w + w / 2] = 0; // door, bottom center
+        serde_json::json!({
+            "width": w, "height": h,
+            "layers": [{"type": "tilelayer", "name": "walls", "data": walls}],
+            "tilesets": [{"firstgid": 1, "tiles": [
+                {"id": 1, "properties": [{"name": "collides", "type": "bool", "value": true}]}
+            ]}]
+        })
+        .to_string()
+    }
+
+    /// Compacts every layout item to fit inside a `map_w x map_h` room:
+    /// items whose footprint already lies within the interior (off the wall
+    /// ring) are kept in place; any item that would fall out of bounds is
+    /// stacked at the near interior corner (1,1). The 9 fixture agents' desks
+    /// and chairs already sit within x∈[2,10], y∈[2,11], so they are never
+    /// moved — their one-to-one chair assignment is preserved. Overlaps are
+    /// intentional and fine: `validate_layout_within_map` only checks bounds
+    /// and map walls, not item-vs-item overlap.
+    fn compact_layout(items: &[LayoutItem], map_w: i32, map_h: i32) -> Vec<LayoutItem> {
+        items
+            .iter()
+            .map(|it| {
+                let mut it = it.clone();
+                let (_, _, fw, fh) = crate::grid::footprint(&it);
+                let fits = it.pos_x >= 1
+                    && it.pos_y >= 1
+                    && it.pos_x + fw < map_w
+                    && it.pos_y + fh < map_h;
+                if !fits {
+                    // Max fixture footprint is 4x3, so (1,1) always fits off
+                    // the wall ring for any map >= 20 wide/tall.
+                    it.pos_x = 1;
+                    it.pos_y = 1;
+                }
+                it
+            })
+            .collect()
+    }
+
+    /// Reviewer R1(a): start from the 48x32 seed and apply a save that
+    /// shrinks BOTH the layout (compacted into 24x24) and the map (24x24)
+    /// together. On the old code `apply_save_file` ran `replace_map(24x24)`
+    /// first, validating the small new map against the still-48x32 layout
+    /// (items out to x=46) — so it failed "outside map bounds" and dropped
+    /// the whole save. The atomic path validates the new layout against the
+    /// new map, so the paired shrink loads and every item/agent survives.
+    #[test]
+    fn shrink_layout_and_map_together_preserves_state() {
+        let base = fixture_world();
+        let mut save = build_save_file(&base);
+        save.layout_items = compact_layout(&base.layout, 24, 24);
+        save.tmj = serde_json::from_str(&ring_tmj(24, 24)).unwrap();
+
+        let loaded = apply_save_file(&base, save).expect("paired shrink must load, not drop");
+        assert_eq!((loaded.map.width, loaded.map.height), (24, 24));
+        assert_eq!(loaded.layout.len(), 94, "all 94 layout items preserved");
+        assert_eq!(loaded.agents.len(), 9, "all 9 agents preserved");
+        assert_eq!(
+            loaded.map_rev, 2,
+            "a paired map+layout change bumps map_rev"
+        );
+    }
+
+    /// Reviewer R1(b): grow into a 96-wide map with a layout item at x=50
+    /// (out of bounds for the original 48-wide map). The new map is 96x24
+    /// (shorter than the original 32-tall), so on the old code
+    /// `replace_map(96x24)` — validated against the still-original layout
+    /// whose items reach y=30 — failed "outside map bounds" and dropped the
+    /// save. The atomic path validates the compacted new layout against the
+    /// new map, so the grow loads and the x>47 item survives.
+    #[test]
+    fn grow_map_and_layout_together_allows_out_of_old_bounds_item() {
+        let base = fixture_world();
+        let mut save = build_save_file(&base);
+        let mut layout = compact_layout(&base.layout, 96, 24);
+        let last = layout.len() - 1;
+        layout[last].pos_x = 50; // > 47: impossible in the old 48-wide map
+        layout[last].pos_y = 1;
+        save.layout_items = layout;
+        save.tmj = serde_json::from_str(&ring_tmj(96, 24)).unwrap();
+
+        let loaded = apply_save_file(&base, save).expect("paired grow must load, not drop");
+        assert_eq!((loaded.map.width, loaded.map.height), (96, 24));
+        assert_eq!(loaded.agents.len(), 9);
+        assert!(
+            loaded.layout.iter().any(|i| i.pos_x == 50),
+            "the x>47 item survived the load into the wider map"
+        );
+    }
+
+    // ---- R3: llm_profile validated on the persist load path -----------
+
+    /// Reviewer R3: a save file whose agent override carries an invalid
+    /// `llm_profile` (here an L0 override, which the API layer rejects) must
+    /// still load — only that agent's `llm_profile` is cleared to defaults,
+    /// every other field and agent is untouched, and the save is not dropped.
+    /// On the old code the unvalidated profile was stored verbatim.
+    #[test]
+    fn invalid_agent_llm_profile_is_cleared_not_rejected() {
+        let base = fixture_world();
+        let mut save = build_save_file(&base);
+        let bad_id = save.agents[0].id;
+        let good_id = save.agents[1].id;
+        save.agents[0].llm_profile = serde_json::json!({"L0": "ollama:mxbai-embed-large"});
+        save.agents[0].reply_style = Some("保留這個欄位".into());
+        save.agents[1].llm_profile = serde_json::json!({"L1": "openai:gpt-4o-mini"});
+
+        let loaded = apply_save_file(&base, save).expect("one bad profile must not drop the save");
+
+        let bad = loaded.agent_by_id(bad_id).unwrap();
+        assert_eq!(
+            bad.agent.llm_profile,
+            serde_json::json!({}),
+            "invalid llm_profile cleared to defaults"
+        );
+        assert_eq!(
+            bad.agent.reply_style.as_deref(),
+            Some("保留這個欄位"),
+            "the agent's other fields are untouched"
+        );
+        let good = loaded.agent_by_id(good_id).unwrap();
+        assert_eq!(
+            good.agent.llm_profile,
+            serde_json::json!({"L1": "openai:gpt-4o-mini"}),
+            "a valid override on another agent is preserved as-is"
+        );
     }
 }

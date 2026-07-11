@@ -21,13 +21,19 @@ import OfficeCanvas from "@/game/OfficeCanvas";
 import TimeControls from "@/panels/TimeControls";
 import LayoutEditorPanel from "@/panels/LayoutEditorPanel";
 import AgentPanel from "@/panels/AgentPanel";
-import { useGameStore } from "@/game/store";
+import { useGameStore, type AppTab } from "@/game/store";
 import type { WorldSnapshotMsg } from "@/game/types";
 import { connectWs, wsUrl, type WsClient } from "@/ws/client";
 
 const MOCK_MODE = process.env.NEXT_PUBLIC_MOCK_SNAPSHOT === "1";
 
-type Tab = "monitor" | "editor" | "agents";
+// The fronted tab lives in the game store (store.activeTab) instead of a
+// local useState: OfficeCanvas's edit-mode camera lock must know whether
+// the editor tab is actually on screen (editorActive && activeTab ===
+// "editor"), so an open draft on a hidden tab doesn't freeze the monitor
+// tab's wheel/drag or overlay its cyan grid. Same values, single source
+// of truth — switching tabs never touches editorActive (drafts survive).
+type Tab = AppTab;
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "monitor", label: "監控" },
@@ -38,7 +44,8 @@ const TABS: { id: Tab; label: string }[] = [
 export default function Home() {
   const clientRef = useRef<WsClient | null>(null);
   const [send, setSend] = useState<((payload: unknown) => void) | null>(null);
-  const [tab, setTab] = useState<Tab>("monitor");
+  const tab = useGameStore((s) => s.activeTab);
+  const setTab = useGameStore((s) => s.setActiveTab);
 
   useEffect(() => {
     const store = useGameStore.getState();
