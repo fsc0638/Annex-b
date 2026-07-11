@@ -21,6 +21,7 @@ create table worlds (
   tick_ms       int  not null default 1000,
   sec_per_tick  int  not null default 10,
   status        text not null default 'paused', -- paused | running | editing ★ | archived
+  map_tmj       jsonb,              -- ★★ADR-002 D2：編輯器 PUT 過的地圖 TMJ，nullable（null＝沿用檔案系統的 office_shell.tmj）
   created_at    timestamptz not null default now()
 );
 
@@ -34,6 +35,7 @@ create table agents (
   reports_to     uuid references agents(id),   -- ★ 回報線（副總為 null）
   core_identity  text not null,
   seed_traits    text not null,
+  reply_style    text,               -- ★★ADR-002 D5：回覆方式（語氣/口吻），nullable
   current_status text not null default 'commuting',
   pos_x          int  not null,
   pos_y          int  not null,

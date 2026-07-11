@@ -82,7 +82,7 @@ pub async fn load_world(pool: &PgPool, world_id: Option<Uuid>) -> Result<LoadedW
 
     let agent_rows = sqlx::query(
         "select id, world_id, name, sprite_key, grade, title, reports_to, core_identity, \
-         seed_traits, current_status, pos_x, pos_y, desk_id, llm_profile \
+         seed_traits, reply_style, current_status, pos_x, pos_y, desk_id, llm_profile \
          from agents where world_id = $1 order by name",
     )
     .bind(world.id)
@@ -119,6 +119,9 @@ pub async fn load_world(pool: &PgPool, world_id: Option<Uuid>) -> Result<LoadedW
             seed_traits: row
                 .try_get("seed_traits")
                 .map_err(|e| format!("db: agents.seed_traits: {e}"))?,
+            reply_style: row
+                .try_get("reply_style")
+                .map_err(|e| format!("db: agents.reply_style: {e}"))?,
             current_status: row
                 .try_get("current_status")
                 .map_err(|e| format!("db: agents.current_status: {e}"))?,

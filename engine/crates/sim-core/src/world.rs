@@ -17,12 +17,13 @@
 
 use std::collections::{HashSet, VecDeque};
 
+use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::commute::{commute_schedule, CommuteEntry};
 use crate::events::SimEvent;
-use crate::grid::CollisionGrid;
+use crate::grid::{suggested_min_size, validate_layout_within_map, CollisionGrid};
 use crate::pathfind::astar;
 use crate::tilemap::TileMap;
 use crate::{Agent, LayoutItem, WorkItem, World, WorldStatus};
@@ -65,16 +66,38 @@ pub struct AgentSim {
     pub reroute_fails: u32,
 }
 
-#[derive(Debug)]
+/// Partial update body for `PATCH /api/v1/agents/:id` (ADR-002 D5). Every
+/// field is optional ("任選") — `None` leaves that field untouched. This is
+/// deserialized directly from the request JSON body by api-server.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AgentPatch {
+    pub name: Option<String>,
+    pub seed_traits: Option<String>,
+    pub core_identity: Option<String>,
+    pub reply_style: Option<String>,
+    pub llm_profile: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
 pub struct WorldState {
     pub world: World,
     /// Runtime speed multiplier (1|2|5). Not a DB column: it scales the
     /// wall-clock tick interval only (see clock::tick_interval_ms).
     pub speed: u32,
+    /// Monotonically increasing map revision counter (ADR-002 D2). Not a DB
+    /// column — rides in the `world_snapshot` payload's `world.map_rev`
+    /// field (like `speed`) so clients can tell a `PUT /world/map` actually
+    /// replaced the map. Starts at 1 for any freshly-assembled world.
+    pub map_rev: u32,
     pub agents: Vec<AgentSim>,
     pub layout: Vec<LayoutItem>,
     pub work_items: Vec<WorkItem>,
     pub map: TileMap,
+    /// The original Tiled JSON document `map` was parsed from — retained
+    /// verbatim (not reconstructed from `TileMap`, which only keeps
+    /// dimensions/collision/doors) so `GET /api/v1/world/map` and
+    /// fixture-mode persistence (ADR-002 D3) can round-trip it exactly.
+    pub map_json: serde_json::Value,
     pub grid: CollisionGrid,
 }
 
@@ -85,17 +108,44 @@ impl WorldState {
     /// is deterministic regardless of source row order.
     pub fn from_parts(
         world: World,
-        mut agents: Vec<Agent>,
+        agents: Vec<Agent>,
         layout: Vec<LayoutItem>,
         work_items: Vec<WorkItem>,
         tmj_str: &str,
     ) -> Result<Self, String> {
-        let map = TileMap::from_tmj_str(tmj_str)?;
+        let map_json: serde_json::Value =
+            serde_json::from_str(tmj_str).map_err(|e| format!("tmj: invalid JSON: {e}"))?;
+        let map = TileMap::from_tmj_value(&map_json)?;
         if map.door_tiles.is_empty() {
             return Err("world: map has no door (no walkable ring gap)".into());
         }
         let grid = CollisionGrid::from_map_and_layout(&map, &layout);
+        let sims = Self::build_agent_sims(agents, &layout)?;
 
+        Ok(WorldState {
+            world,
+            speed: 1,
+            map_rev: 1,
+            agents: sims,
+            layout,
+            work_items,
+            map,
+            map_json,
+            grid,
+        })
+    }
+
+    /// Resolves each agent's desk -> chair -> spawn schedule and builds the
+    /// roster of [`AgentSim`]s, sorted by name for deterministic per-tick
+    /// processing order. Shared by [`Self::from_parts`] and
+    /// [`Self::replace_layout`] so both paths enforce the same rules:
+    /// every agent has a `desk_id` that resolves to a layout item, that
+    /// desk has a `<key>-chair` sibling that is walkable, and chair
+    /// assignment is one-to-one across the whole roster.
+    fn build_agent_sims(
+        mut agents: Vec<Agent>,
+        layout: &[LayoutItem],
+    ) -> Result<Vec<AgentSim>, String> {
         agents.sort_by(|a, b| a.name.cmp(&b.name));
         let schedule: Vec<CommuteEntry> = commute_schedule(&agents);
 
@@ -147,16 +197,118 @@ impl WorldState {
                 reroute_fails: 0,
             });
         }
+        Ok(sims)
+    }
 
-        Ok(WorldState {
-            world,
-            speed: 1,
-            agents: sims,
-            layout,
-            work_items,
-            map,
-            grid,
-        })
+    /// Replaces the resident map (ADR-002 D2 `PUT /api/v1/world/map`):
+    /// parses + validates the new tmj (shape: size 20..=96, has a door,
+    /// fully flood-fill connected), then checks the *existing* layout still
+    /// fits inside it (in bounds, no item on a wall — with a "minimum
+    /// viable size" hint on failure). Only on success does it replace
+    /// `map`/`map_json`/`grid`, bump `map_rev`, and reset the world to
+    /// day-start paused (ADR-002: "等同重啟語意，簡單且決定性").
+    pub fn replace_map(&mut self, tmj_str: &str) -> Result<(), String> {
+        let map_json: serde_json::Value =
+            serde_json::from_str(tmj_str).map_err(|e| format!("tmj: invalid JSON: {e}"))?;
+        let map = TileMap::from_tmj_value(&map_json)?;
+        map.validate_shape()?;
+        validate_layout_within_map(&map, &self.layout).map_err(|e| {
+            let (min_w, min_h) = suggested_min_size(&self.layout);
+            format!(
+                "{e}; 最小可行尺寸提示：至少 {min_w}x{min_h}（依現有家具＋牆環外框推算，先擴大房間或先搬移/刪除家具再縮小）"
+            )
+        })?;
+        let grid = CollisionGrid::from_map_and_layout(&map, &self.layout);
+        self.map = map;
+        self.map_json = map_json;
+        self.grid = grid;
+        self.map_rev += 1;
+        self.reset_to_day_start();
+        Ok(())
+    }
+
+    /// Replaces the resident layout (ADR-002 D2 `PUT /api/v1/world/layout`):
+    /// validates the new items against the *current* map (in bounds, no
+    /// wall overlap), then re-resolves every agent's desk/chair against the
+    /// new layout via the same rules [`Self::from_parts`] enforces (chair
+    /// one-to-one, etc.). Only on success does it replace `layout`/`grid`/
+    /// `agents` and reset the world to day-start paused.
+    pub fn replace_layout(&mut self, new_layout: Vec<LayoutItem>) -> Result<(), String> {
+        validate_layout_within_map(&self.map, &new_layout)?;
+        let agents: Vec<Agent> = self.agents.iter().map(|a| a.agent.clone()).collect();
+        let sims = Self::build_agent_sims(agents, &new_layout)?;
+        let grid = CollisionGrid::from_map_and_layout(&self.map, &new_layout);
+        self.layout = new_layout;
+        self.grid = grid;
+        self.agents = sims;
+        self.reset_to_day_start();
+        Ok(())
+    }
+
+    /// Applies a partial update to one agent (ADR-002 D5 `PATCH
+    /// /api/v1/agents/:id`). Does NOT reset the world or touch position —
+    /// only the four editable fields plus `llm_profile` (format/tier
+    /// validation of `llm_profile` is the caller's job, since it needs
+    /// `llm-gateway`'s provider table, which sim-core does not depend on;
+    /// this method only enforces the rules it can: agent existence, and
+    /// name non-empty + unique within the world).
+    pub fn patch_agent(&mut self, id: Uuid, patch: AgentPatch) -> Result<(), String> {
+        if !self.agents.iter().any(|a| a.agent.id == id) {
+            return Err(format!("agent {id} not found"));
+        }
+        if let Some(name) = &patch.name {
+            if name.trim().is_empty() {
+                return Err("name must not be empty".into());
+            }
+            if self
+                .agents
+                .iter()
+                .any(|a| a.agent.id != id && a.agent.name == *name)
+            {
+                return Err(format!(
+                    "agent name '{name}' is already used by another agent in this world"
+                ));
+            }
+        }
+        let sim = self
+            .agents
+            .iter_mut()
+            .find(|a| a.agent.id == id)
+            .expect("existence checked above");
+        if let Some(v) = patch.name {
+            sim.agent.name = v;
+        }
+        if let Some(v) = patch.seed_traits {
+            sim.agent.seed_traits = v;
+        }
+        if let Some(v) = patch.core_identity {
+            sim.agent.core_identity = v;
+        }
+        if let Some(v) = patch.reply_style {
+            sim.agent.reply_style = Some(v);
+        }
+        if let Some(v) = patch.llm_profile {
+            sim.agent.llm_profile = v;
+        }
+        Ok(())
+    }
+
+    /// Resets the clock to 07:00 kickoff, pauses the world, and marks every
+    /// agent as not-yet-spawned/commuting (ADR-002 D2: map/layout replaces
+    /// are "等同重啟語意"). Without this, an agent whose `current_status`
+    /// was left as e.g. `seated` from before the replace would never
+    /// re-spawn (the tick loop only spawns agents whose status is
+    /// `commuting`), silently vanishing from the floor after an edit.
+    fn reset_to_day_start(&mut self) {
+        self.world.status = WorldStatus::Paused;
+        self.world.sim_clock_sec = crate::clock::game_secs(7, 0);
+        for a in &mut self.agents {
+            a.agent.current_status = STATUS_COMMUTING.to_string();
+            a.spawned = false;
+            a.path.clear();
+            a.stall_ticks = 0;
+            a.reroute_fails = 0;
+        }
     }
 
     pub fn pause(&mut self) {
@@ -344,10 +496,12 @@ impl WorldState {
 
     /// Builds the 7.4 `world_snapshot` message (snake_case). The runtime
     /// `speed` rides inside `world` so a reconnecting client restores its
-    /// speed selector too.
+    /// speed selector too; `map_rev` (ADR-002 D2) likewise lets a client
+    /// tell a `PUT /world/map` actually took effect.
     pub fn snapshot_json(&self) -> serde_json::Value {
         let mut world = serde_json::to_value(&self.world).expect("world serializes");
         world["speed"] = json!(self.speed);
+        world["map_rev"] = json!(self.map_rev);
         json!({
             "type": "world_snapshot",
             "world": world,
@@ -514,6 +668,7 @@ mod tests {
             reports_to: None,
             core_identity: "t".into(),
             seed_traits: "t".into(),
+            reply_style: None,
             current_status: STATUS_COMMUTING.into(),
             pos_x: 0,
             pos_y: 0,
@@ -688,5 +843,271 @@ mod tests {
             ws.agents[1].reroute_fails >= STUCK_REROUTE_STREAK,
             "streak counter reflects the sustained failure"
         );
+    }
+
+    // ---- ADR-002 D2/D5: replace_map / replace_layout / patch_agent -----
+
+    /// A valid ring-of-walls `w x h` tmj with a bottom-center door — unlike
+    /// `tiny_tmj()` (6x6, below the D2 size floor), this is sized for
+    /// `replace_map` success-path tests (20..=96 required).
+    fn ring_tmj(w: i32, h: i32) -> String {
+        let (w, h) = (w as usize, h as usize);
+        let mut walls = vec![0i64; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
+                    walls[y * w + x] = 2;
+                }
+            }
+        }
+        walls[(h - 1) * w + w / 2] = 0; // door, bottom center
+        serde_json::json!({
+            "width": w, "height": h,
+            "layers": [{"type": "tilelayer", "name": "walls", "data": walls}],
+            "tilesets": [{"firstgid": 1, "tiles": [
+                {"id": 1, "properties": [{"name": "collides", "type": "bool", "value": true}]}
+            ]}]
+        })
+        .to_string()
+    }
+
+    fn single_agent_world() -> (WorldState, Uuid) {
+        let desk_id = Uuid::new_v4();
+        let layout = vec![
+            tiny_layout_item(desk_id, crate::LayoutItemKind::Desk, "deskA", 2, 2, false),
+            tiny_layout_item(
+                Uuid::new_v4(),
+                crate::LayoutItemKind::Chair,
+                "deskA-chair",
+                2,
+                3,
+                true,
+            ),
+        ];
+        let agent = tiny_agent("甲", desk_id);
+        let agent_id = agent.id;
+        let ws = WorldState::from_parts(tiny_world(), vec![agent], layout, vec![], &tiny_tmj())
+            .expect("valid single-agent world");
+        (ws, agent_id)
+    }
+
+    #[test]
+    fn replace_map_updates_map_bumps_rev_and_resets_day_start() {
+        let (mut ws, _id) = single_agent_world();
+        assert_eq!(ws.map_rev, 1);
+        ws.resume();
+        ws.world.sim_clock_sec = crate::clock::game_secs(10, 0);
+        ws.agents[0].agent.current_status = STATUS_SEATED.to_string();
+        ws.agents[0].spawned = true;
+
+        ws.replace_map(&ring_tmj(24, 20))
+            .expect("new map is within range and the existing layout still fits");
+
+        assert_eq!(ws.map_rev, 2);
+        assert_eq!((ws.map.width, ws.map.height), (24, 20));
+        assert_eq!(ws.world.status, WorldStatus::Paused);
+        assert_eq!(ws.world.sim_clock_sec, crate::clock::game_secs(7, 0));
+        assert_eq!(ws.agents[0].agent.current_status, STATUS_COMMUTING);
+        assert!(!ws.agents[0].spawned);
+    }
+
+    #[test]
+    fn replace_map_rejects_out_of_range_size_and_leaves_state_unchanged() {
+        let (mut ws, _id) = single_agent_world();
+        let err = ws.replace_map(&ring_tmj(10, 10)).unwrap_err();
+        assert!(err.contains("20"), "{err}");
+        assert_eq!(ws.map_rev, 1, "a rejected replace must not bump map_rev");
+        assert_eq!(
+            (ws.map.width, ws.map.height),
+            (6, 6),
+            "map itself must be untouched"
+        );
+    }
+
+    #[test]
+    fn replace_map_rejects_when_layout_no_longer_fits_and_hints_min_size() {
+        let mut ws = WorldState::from_parts(
+            tiny_world(),
+            vec![],
+            vec![tiny_layout_item(
+                Uuid::new_v4(),
+                crate::LayoutItemKind::Desk,
+                "deskFar",
+                25,
+                5,
+                false,
+            )],
+            vec![],
+            &tiny_tmj(),
+        )
+        .unwrap();
+        let err = ws.replace_map(&ring_tmj(20, 20)).unwrap_err();
+        assert!(err.contains("outside map bounds"), "{err}");
+        assert!(err.contains("最小可行尺寸"), "{err}");
+        assert_eq!(ws.map_rev, 1, "a rejected replace must not bump map_rev");
+    }
+
+    #[test]
+    fn replace_layout_rejects_when_agent_desk_removed_and_leaves_state_unchanged() {
+        let (mut ws, _id) = single_agent_world();
+        let err = ws.replace_layout(vec![]).unwrap_err();
+        assert!(err.contains("not in layout"), "{err}");
+        assert_eq!(
+            ws.layout.len(),
+            2,
+            "a rejected replace must not mutate layout"
+        );
+    }
+
+    #[test]
+    fn replace_layout_updates_layout_and_resets_day_start() {
+        let desk_id = Uuid::new_v4();
+        let old_layout = vec![
+            tiny_layout_item(desk_id, crate::LayoutItemKind::Desk, "deskA", 2, 2, false),
+            tiny_layout_item(
+                Uuid::new_v4(),
+                crate::LayoutItemKind::Chair,
+                "deskA-chair",
+                2,
+                3,
+                true,
+            ),
+        ];
+        let agents = vec![tiny_agent("甲", desk_id)];
+        let mut ws =
+            WorldState::from_parts(tiny_world(), agents, old_layout, vec![], &tiny_tmj()).unwrap();
+        ws.resume();
+        ws.agents[0].agent.current_status = STATUS_SEATED.to_string();
+        ws.agents[0].spawned = true;
+
+        let new_layout = vec![
+            tiny_layout_item(desk_id, crate::LayoutItemKind::Desk, "deskA", 3, 3, false),
+            tiny_layout_item(
+                Uuid::new_v4(),
+                crate::LayoutItemKind::Chair,
+                "deskA-chair",
+                3,
+                4,
+                true,
+            ),
+        ];
+        ws.replace_layout(new_layout)
+            .expect("valid replacement layout");
+
+        assert_eq!(ws.layout.len(), 2);
+        assert_eq!(
+            ws.agents[0].chair,
+            (3, 4),
+            "chair resolved against new layout"
+        );
+        assert_eq!(ws.world.status, WorldStatus::Paused);
+        assert_eq!(ws.world.sim_clock_sec, crate::clock::game_secs(7, 0));
+        assert_eq!(ws.agents[0].agent.current_status, STATUS_COMMUTING);
+    }
+
+    #[test]
+    fn patch_agent_updates_editable_fields_without_resetting_world() {
+        let (mut ws, id) = single_agent_world();
+        let status_before = ws.world.status;
+        let clock_before = ws.world.sim_clock_sec;
+
+        ws.patch_agent(
+            id,
+            AgentPatch {
+                name: Some("乙".into()),
+                seed_traits: Some("新特質".into()),
+                core_identity: None,
+                reply_style: Some("簡短有力".into()),
+                llm_profile: Some(serde_json::json!({"L2": "openai:gpt-4o-mini"})),
+            },
+        )
+        .expect("valid patch");
+
+        assert_eq!(ws.agents[0].agent.name, "乙");
+        assert_eq!(ws.agents[0].agent.seed_traits, "新特質");
+        assert_eq!(
+            ws.agents[0].agent.core_identity, "t",
+            "untouched field stays as-is"
+        );
+        assert_eq!(ws.agents[0].agent.reply_style.as_deref(), Some("簡短有力"));
+        assert_eq!(ws.agents[0].agent.llm_profile["L2"], "openai:gpt-4o-mini");
+        assert_eq!(
+            ws.world.status, status_before,
+            "PATCH must not reset the world"
+        );
+        assert_eq!(
+            ws.world.sim_clock_sec, clock_before,
+            "PATCH must not touch the clock"
+        );
+    }
+
+    #[test]
+    fn patch_agent_rejects_empty_name() {
+        let (mut ws, id) = single_agent_world();
+        let err = ws
+            .patch_agent(
+                id,
+                AgentPatch {
+                    name: Some("   ".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn patch_agent_rejects_duplicate_name_within_world() {
+        let desk_a = Uuid::new_v4();
+        let desk_b = Uuid::new_v4();
+        let layout = vec![
+            tiny_layout_item(desk_a, crate::LayoutItemKind::Desk, "deskA", 2, 2, false),
+            tiny_layout_item(
+                Uuid::new_v4(),
+                crate::LayoutItemKind::Chair,
+                "deskA-chair",
+                2,
+                3,
+                true,
+            ),
+            tiny_layout_item(desk_b, crate::LayoutItemKind::Desk, "deskB", 3, 2, false),
+            tiny_layout_item(
+                Uuid::new_v4(),
+                crate::LayoutItemKind::Chair,
+                "deskB-chair",
+                3,
+                3,
+                true,
+            ),
+        ];
+        let agents = vec![tiny_agent("甲", desk_a), tiny_agent("乙", desk_b)];
+        let mut ws =
+            WorldState::from_parts(tiny_world(), agents, layout, vec![], &tiny_tmj()).unwrap();
+        let target_id = ws
+            .agents
+            .iter()
+            .find(|a| a.agent.name == "甲")
+            .unwrap()
+            .agent
+            .id;
+        let err = ws
+            .patch_agent(
+                target_id,
+                AgentPatch {
+                    name: Some("乙".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("already used"), "{err}");
+    }
+
+    #[test]
+    fn patch_agent_errors_on_unknown_id() {
+        let (mut ws, _id) = single_agent_world();
+        let err = ws
+            .patch_agent(Uuid::new_v4(), AgentPatch::default())
+            .unwrap_err();
+        assert!(err.contains("not found"), "{err}");
     }
 }

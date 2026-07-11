@@ -70,7 +70,25 @@ pub async fn load_world_state(pool: Option<&PgPool>) -> Result<WorldState, Strin
             let path = fixture_path();
             let fixture_json = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read fixture at {path}: {e}"))?;
-            WorldState::from_fixture_strs(&fixture_json, &tmj)
+            let base = WorldState::from_fixture_strs(&fixture_json, &tmj)?;
+            // ADR-002 D3: a persisted world save (from a previous PUT
+            // /world/map, /world/layout, or PATCH /agents/:id) takes
+            // priority over the seed fixture, if present and still valid
+            // against it. A missing file is the normal first-boot case
+            // (no WARN); a corrupt/incompatible file is ignored with a
+            // WARN and the seed fixture is used as-is — never a crash.
+            let save_path = sim_core::persist::save_path_from_env();
+            match sim_core::persist::try_load_and_apply(&base, &save_path) {
+                Ok(Some(loaded)) => {
+                    tracing::info!(path = %save_path, "loaded persisted world save over the seed fixture");
+                    Ok(loaded)
+                }
+                Ok(None) => Ok(base),
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %save_path, "ignoring invalid world save file; using seed fixture");
+                    Ok(base)
+                }
+            }
         }
         WorldSource::Db => {
             let pool = pool.ok_or(

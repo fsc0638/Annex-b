@@ -26,9 +26,16 @@ impl TileMap {
     /// properties, layer data length == width*height.
     pub fn from_tmj_str(s: &str) -> Result<Self, String> {
         let root: Value = serde_json::from_str(s).map_err(|e| format!("tmj: invalid JSON: {e}"))?;
+        Self::from_tmj_value(&root)
+    }
 
-        let width = get_i64(&root, "width")? as i32;
-        let height = get_i64(&root, "height")? as i32;
+    /// Same parsing/validation as [`Self::from_tmj_str`] but starting from
+    /// an already-parsed [`Value`] — used by `WorldState` so it can retain
+    /// the original document (for `GET /api/v1/world/map` and fixture-mode
+    /// persistence, ADR-002 D2/D3) without re-serializing and re-parsing it.
+    pub fn from_tmj_value(root: &Value) -> Result<Self, String> {
+        let width = get_i64(root, "width")? as i32;
+        let height = get_i64(root, "height")? as i32;
         if width <= 0 || height <= 0 {
             return Err(format!("tmj: bad dimensions {width}x{height}"));
         }
@@ -135,6 +142,79 @@ impl TileMap {
             return true;
         }
         self.blocked[(y * self.width + x) as usize]
+    }
+
+    /// Allowed room dimensions for `PUT /api/v1/world/map` (ADR-002 D2).
+    pub const MIN_SIZE: i32 = 20;
+    pub const MAX_SIZE: i32 = 96;
+
+    /// Extra structural checks beyond what [`Self::from_tmj_str`] already
+    /// enforces while parsing (ADR-002 D2, `PUT /api/v1/world/map`):
+    /// - both dimensions within `MIN_SIZE..=MAX_SIZE`;
+    /// - at least one door tile (also re-checked here since this method is
+    ///   called standalone, before any `WorldState` exists, unlike
+    ///   `WorldState::from_parts`'s own door check);
+    /// - every walkable tile is reachable from a door by 4-directional
+    ///   flood-fill (spec 7.3 validation rule 2: no isolated floor pockets).
+    pub fn validate_shape(&self) -> Result<(), String> {
+        if !(Self::MIN_SIZE..=Self::MAX_SIZE).contains(&self.width)
+            || !(Self::MIN_SIZE..=Self::MAX_SIZE).contains(&self.height)
+        {
+            return Err(format!(
+                "tmj: map size {}x{} out of allowed range {}..={}",
+                self.width,
+                self.height,
+                Self::MIN_SIZE,
+                Self::MAX_SIZE
+            ));
+        }
+        if self.door_tiles.is_empty() {
+            return Err("tmj: map has no door tile (no walkable ring gap)".into());
+        }
+        if !self.is_flood_connected() {
+            return Err(
+                "tmj: map floor is not fully connected (flood-fill from the door does not \
+                 reach every walkable tile)"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// True iff a 4-directional flood-fill starting at the first door tile
+    /// reaches every non-blocked tile on the map.
+    fn is_flood_connected(&self) -> bool {
+        let total_walkable = (0..self.height)
+            .flat_map(|y| (0..self.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| !self.is_blocked(x, y))
+            .count();
+        if total_walkable == 0 {
+            return false;
+        }
+        let idx = |x: i32, y: i32| (y * self.width + x) as usize;
+        let start = self.door_tiles[0];
+        let mut visited = vec![false; (self.width * self.height) as usize];
+        visited[idx(start.0, start.1)] = true;
+        let mut stack = vec![start];
+        let mut visited_count = 1usize;
+        while let Some((x, y)) = stack.pop() {
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (nx, ny) = (x + dx, y + dy);
+                if nx < 0 || ny < 0 || nx >= self.width || ny >= self.height {
+                    continue;
+                }
+                if self.is_blocked(nx, ny) {
+                    continue;
+                }
+                let i = idx(nx, ny);
+                if !visited[i] {
+                    visited[i] = true;
+                    visited_count += 1;
+                    stack.push((nx, ny));
+                }
+            }
+        }
+        visited_count == total_walkable
     }
 }
 
@@ -257,5 +337,89 @@ mod tests {
         })
         .to_string();
         assert!(TileMap::from_tmj_str(&bad).is_err());
+    }
+
+    /// A ring-of-walls `w x h` map with one door at the bottom-center and,
+    /// optionally, one extra interior wall segment (for the disconnected-
+    /// pocket test below).
+    fn ring_tmj(w: usize, h: usize, extra_wall: Option<(usize, usize)>) -> String {
+        let mut walls = vec![0i64; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
+                    walls[y * w + x] = 2;
+                }
+            }
+        }
+        walls[(h - 1) * w + w / 2] = 0; // door, bottom center
+        if let Some((x, y)) = extra_wall {
+            walls[y * w + x] = 2;
+        }
+        serde_json::json!({
+            "width": w, "height": h,
+            "layers": [{"type": "tilelayer", "name": "walls", "data": walls}],
+            "tilesets": [{"firstgid": 1, "tiles": [
+                {"id": 1, "properties": [{"name": "collides", "type": "bool", "value": true}]}
+            ]}]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn validate_shape_accepts_a_connected_map_in_range() {
+        let map = TileMap::from_tmj_str(&ring_tmj(24, 20, None)).unwrap();
+        assert!(map.validate_shape().is_ok());
+    }
+
+    #[test]
+    fn validate_shape_rejects_too_small_and_too_large() {
+        let too_small = TileMap::from_tmj_str(&ring_tmj(10, 10, None)).unwrap();
+        let err = too_small.validate_shape().unwrap_err();
+        assert!(
+            err.contains("20"),
+            "error should mention the min bound: {err}"
+        );
+
+        let too_large = TileMap::from_tmj_str(&ring_tmj(97, 97, None)).unwrap();
+        let err = too_large.validate_shape().unwrap_err();
+        assert!(
+            err.contains("96"),
+            "error should mention the max bound: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_shape_rejects_disconnected_floor_pocket() {
+        // A 24x20 ring with a door, plus a full interior wall column at
+        // x=12 that has no gap — splits the floor into two unreachable
+        // halves even though a door exists.
+        let w = 24;
+        let h = 20;
+        let mut walls = vec![0i64; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
+                    walls[y * w + x] = 2;
+                }
+            }
+        }
+        walls[(h - 1) * w + w / 2] = 0; // door
+        for y in 1..h - 1 {
+            walls[y * w + 12] = 2; // full-height interior partition, no gap
+        }
+        let tmj = serde_json::json!({
+            "width": w, "height": h,
+            "layers": [{"type": "tilelayer", "name": "walls", "data": walls}],
+            "tilesets": [{"firstgid": 1, "tiles": [
+                {"id": 1, "properties": [{"name": "collides", "type": "bool", "value": true}]}
+            ]}]
+        })
+        .to_string();
+        let map = TileMap::from_tmj_str(&tmj).unwrap();
+        let err = map.validate_shape().unwrap_err();
+        assert!(
+            err.contains("connected"),
+            "error should explain the connectivity failure: {err}"
+        );
     }
 }

@@ -15,6 +15,10 @@
 //! - [`fixture`]: DB-less loading from the world fixture JSON + tmj.
 //! - [`db`] (feature `db`): sqlx **runtime-query** loading path (repo rule:
 //!   never `query!` compile-time macros — no DB at build time).
+//! - [`persist`]: ADR-002 D3 fixture-mode world save/restore
+//!   (`WORLD_SAVE_PATH`), built on `world::WorldState::replace_map` /
+//!   `replace_layout` / `patch_agent` so a save file can never resurrect an
+//!   invalid world.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -27,6 +31,7 @@ pub mod events;
 pub mod fixture;
 pub mod grid;
 pub mod pathfind;
+pub mod persist;
 pub mod tilemap;
 pub mod world;
 
@@ -86,6 +91,12 @@ pub struct Agent {
     pub reports_to: Option<Uuid>,
     pub core_identity: String,
     pub seed_traits: String,
+    /// ADR-002 D5: how this agent phrases replies (e.g. "簡潔有力，語畢即
+    /// 止"). Maps to `agents.reply_style text` (nullable — older rows /
+    /// fixtures without the field default to `None` rather than failing to
+    /// deserialize).
+    #[serde(default)]
+    pub reply_style: Option<String>,
     pub current_status: String,
     pub pos_x: i32,
     pub pos_y: i32,

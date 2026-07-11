@@ -67,10 +67,10 @@ export function parseLayoutItems(script = readSeedScript()) {
 }
 
 const AGENT_BLOCK_RE =
-  /select (?:w\.)?id, '([^']+)', '([^']+)', '([^']+)', '([^']+)', (null|vp\.id|mgr\.id),\n\s*'([^']+)',\n\s*'([^']+)',\n\s*'commuting', 0, 0, '\{\}'::jsonb/g;
+  /select (?:w\.)?id, '([^']+)', '([^']+)', '([^']+)', '([^']+)', (null|vp\.id|mgr\.id),\n\s*'([^']+)',\n\s*'([^']+)',\n\s*'([^']+)',\n\s*'commuting', 0, 0, '\{\}'::jsonb/g;
 
 /**
- * @returns {Array<{name, sprite_key, grade, title, reports_to_name}>}
+ * @returns {Array<{name, sprite_key, grade, title, reports_to_name, reply_style}>}
  *   reports_to_name is null (VP), or the referenced agent's name.
  */
 export function parseAgents(script = readSeedScript()) {
@@ -85,6 +85,7 @@ export function parseAgents(script = readSeedScript()) {
       reports_to_ref: m[5], // 'null' | 'vp.id' | 'mgr.id'
       core_identity: m[6],
       seed_traits: m[7],
+      reply_style: m[8],
     });
   }
   if (agents.length !== 9) {

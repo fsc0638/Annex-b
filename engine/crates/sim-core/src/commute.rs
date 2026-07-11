@@ -69,6 +69,7 @@ mod tests {
             reports_to: None,
             core_identity: "c".into(),
             seed_traits: "s".into(),
+            reply_style: None,
             current_status: "commuting".into(),
             pos_x: 0,
             pos_y: 0,

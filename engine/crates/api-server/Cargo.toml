@@ -29,6 +29,9 @@ anyhow.workspace = true
 dotenvy.workspace = true
 # WebSocket handler needs StreamExt/SinkExt to split the axum socket.
 futures-util = { version = "0.3", default-features = false }
+# CORS layer for the REST endpoints (ADR-002 D2): web dev runs on :3000,
+# api-server on :8080, so browser requests are cross-origin.
+tower-http = { version = "0.5", features = ["cors"] }
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }

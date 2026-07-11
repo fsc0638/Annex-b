@@ -116,6 +116,7 @@ function main() {
         : null,
       core_identity: row.core_identity,
       seed_traits: row.seed_traits,
+      reply_style: row.reply_style,
       // seat_update semantics in seed_world.sh: agent pos = its desk's
       // top-left tile; current_status stays 'commuting' (spec: 07:00
       // kickoff has nobody on the floor yet).

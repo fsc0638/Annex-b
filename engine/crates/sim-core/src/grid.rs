@@ -22,6 +22,54 @@ pub fn footprint(item: &LayoutItem) -> (i32, i32, i32, i32) {
     }
 }
 
+/// Validates that every layout item's footprint lies fully within the
+/// map's bounds and does not overlap a tile the map itself marks as
+/// colliding (ADR-002 D2, `PUT /api/v1/world/map` and `PUT
+/// /api/v1/world/layout`: "現有 layout items 全部在界內且不壓牆"). Does
+/// NOT check layout-vs-layout overlap (that is a design choice left to the
+/// editor UI, unchanged from before this validation existed).
+pub fn validate_layout_within_map(map: &TileMap, layout: &[LayoutItem]) -> Result<(), String> {
+    for item in layout {
+        let (fx, fy, fw, fh) = footprint(item);
+        for y in fy..fy + fh {
+            for x in fx..fx + fw {
+                if x < 0 || y < 0 || x >= map.width || y >= map.height {
+                    return Err(format!(
+                        "layout item '{}' ({}) footprint cell ({x},{y}) is outside map bounds \
+                         {}x{}",
+                        item.key, item.name, map.width, map.height
+                    ));
+                }
+                if map.is_blocked(x, y) {
+                    return Err(format!(
+                        "layout item '{}' ({}) footprint cell ({x},{y}) overlaps a wall/window \
+                         tile",
+                        item.key, item.name
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A rough "minimum viable size" hint for a 422 error message when a
+/// smaller map can no longer fit the existing furniture (ADR-002 D2: "訊息
+/// 含最小可行尺寸"): the bounding box of every layout item's footprint,
+/// plus one tile on the far edge for the boundary wall ring (items already
+/// assume a wall ring on the near edge, since the seed layout's minimum
+/// coordinate is 1, not 0).
+pub fn suggested_min_size(layout: &[LayoutItem]) -> (i32, i32) {
+    let mut max_x = 0;
+    let mut max_y = 0;
+    for item in layout {
+        let (fx, fy, fw, fh) = footprint(item);
+        max_x = max_x.max(fx + fw);
+        max_y = max_y.max(fy + fh);
+    }
+    (max_x + 1, max_y + 1)
+}
+
 #[derive(Debug, Clone)]
 pub struct CollisionGrid {
     pub width: i32,
@@ -214,5 +262,38 @@ mod tests {
         assert!(!grid.is_blocked(4, 7), "door tile stays walkable");
         assert!(grid.is_blocked(-1, 4));
         assert!(grid.is_blocked(8, 4));
+    }
+
+    #[test]
+    fn validate_layout_within_map_accepts_in_bounds_off_wall_items() {
+        let map = open_map(8, 8);
+        let layout = vec![item(crate::LayoutItemKind::Desk, 2, 2, 2, 1, 0, false)];
+        assert!(validate_layout_within_map(&map, &layout).is_ok());
+    }
+
+    #[test]
+    fn validate_layout_within_map_rejects_out_of_bounds_item() {
+        let map = open_map(8, 8);
+        let layout = vec![item(crate::LayoutItemKind::Desk, 8, 2, 2, 1, 0, false)];
+        let err = validate_layout_within_map(&map, &layout).unwrap_err();
+        assert!(err.contains("outside map bounds"), "{err}");
+    }
+
+    #[test]
+    fn validate_layout_within_map_rejects_item_on_wall() {
+        let map = open_map(8, 8);
+        let layout = vec![item(crate::LayoutItemKind::Desk, 0, 2, 1, 1, 0, false)];
+        let err = validate_layout_within_map(&map, &layout).unwrap_err();
+        assert!(err.contains("overlaps a wall"), "{err}");
+    }
+
+    #[test]
+    fn suggested_min_size_is_bounding_box_plus_one() {
+        let layout = vec![
+            item(crate::LayoutItemKind::Desk, 2, 2, 2, 1, 0, false),
+            item(crate::LayoutItemKind::Chair, 5, 6, 1, 1, 0, true),
+        ];
+        // Bounding box: x in [2,6), y in [2,7) -> max_x=6, max_y=7 -> +1 each.
+        assert_eq!(suggested_min_size(&layout), (7, 8));
     }
 }
