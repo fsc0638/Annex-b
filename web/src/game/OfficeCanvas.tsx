@@ -22,12 +22,32 @@ import {
   TextStyle,
   Texture,
 } from "pixi.js";
+import { apiJson } from "@/api/client";
 import { useGameStore } from "./store";
 import { footprintOf, type AgentRow, type LayoutItemRow } from "./types";
 
 const TILE = 32;
-const MAP_W = 48;
-const MAP_H = 32;
+
+// The Pixi render target ("viewport") is a fixed pixel size, decoupled
+// from the loaded map's actual width/height — this is what makes camera
+// zoom/pan meaningful (map bigger than viewport -> zoomed in by default;
+// smaller -> letterboxed) instead of the map always exactly filling the
+// canvas. Sized to the legacy default map (48x32) so that map's `fit`
+// view (zoom=1, centered) is pixel-identical to the pre-camera baseline.
+const VIEWPORT_TILES_W = 48;
+const VIEWPORT_TILES_H = 32;
+const VIEWPORT_W = VIEWPORT_TILES_W * TILE;
+const VIEWPORT_H = VIEWPORT_TILES_H * TILE;
+
+const ZOOM_MIN = 0.5;
+const ZOOM_MAX = 3.0;
+const WHEEL_ZOOM_STEP = 1.1;
+
+// Mirrors app/page.tsx's mock-mode flag: in mock mode the map comes from
+// the static /maps/office_shell.tmj fixture (no engine to GET from); in
+// live mode it comes from the store's cached GET /api/v1/world/map,
+// refetched whenever world.map_rev disagrees with the cache (ADR-002 D2).
+const MOCK_MODE = process.env.NEXT_PUBLIC_MOCK_SNAPSHOT === "1";
 
 // Direction rows in the generated spritesheets (scripts/gen_agent_sprites.mjs).
 const DIR_DOWN = 0;
@@ -345,7 +365,12 @@ function drawFurniture(
   }
 }
 
-function drawGrid(container: Container, visible: boolean) {
+function drawGrid(
+  container: Container,
+  visible: boolean,
+  widthTiles: number,
+  heightTiles: number
+) {
   let g = container.children[0] as Graphics | undefined;
   if (!g) {
     g = new Graphics();
@@ -355,15 +380,15 @@ function drawGrid(container: Container, visible: boolean) {
   }
   container.visible = visible;
   if (!visible) return;
-  for (let x = 0; x <= MAP_W; x++) {
-    g.moveTo(x * TILE, 0).lineTo(x * TILE, MAP_H * TILE).stroke({
+  for (let x = 0; x <= widthTiles; x++) {
+    g.moveTo(x * TILE, 0).lineTo(x * TILE, heightTiles * TILE).stroke({
       color: 0x66d9ef,
       alpha: 0.16,
       width: 1,
     });
   }
-  for (let y = 0; y <= MAP_H; y++) {
-    g.moveTo(0, y * TILE).lineTo(MAP_W * TILE, y * TILE).stroke({
+  for (let y = 0; y <= heightTiles; y++) {
+    g.moveTo(0, y * TILE).lineTo(widthTiles * TILE, y * TILE).stroke({
       color: 0x66d9ef,
       alpha: 0.16,
       width: 1,
@@ -371,8 +396,29 @@ function drawGrid(container: Container, visible: boolean) {
   }
 }
 
+/** Fetches the current map from the engine and caches it in the store
+ * (ADR-002 D2). Returns `null` (and logs a warning) on any failure — e.g.
+ * the engine isn't running yet, or the world isn't loaded (503) — so
+ * callers can degrade to an empty map layer instead of crashing; the
+ * map_rev-driven refetch (see `ensureFreshMap` below) retries once a
+ * world_snapshot eventually arrives over `/ws`. */
+async function fetchLiveMap(): Promise<TmjDoc | null> {
+  try {
+    const res = await apiJson<{ tmj: TmjDoc; map_rev: number }>(
+      "/api/v1/world/map"
+    );
+    useGameStore.getState().setMap(res.tmj, res.map_rev);
+    return res.tmj;
+  } catch (err) {
+    console.warn("[sim] failed to load live map from /api/v1/world/map", err);
+    return null;
+  }
+}
+
 export default function OfficeCanvas() {
   const hostRef = useRef<HTMLDivElement>(null);
+  const fitViewRef = useRef<(() => void) | null>(null);
+  const oneToOneViewRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -384,8 +430,8 @@ export default function OfficeCanvas() {
     (async () => {
       const created = new Application();
       await created.init({
-        width: MAP_W * TILE,
-        height: MAP_H * TILE,
+        width: VIEWPORT_W,
+        height: VIEWPORT_H,
         background: 0x14161c,
         antialias: false,
         resolution: Math.min(window.devicePixelRatio || 1, 2),
@@ -401,12 +447,143 @@ export default function OfficeCanvas() {
       host.appendChild(app.canvas);
       app.canvas.style.width = "100%";
       app.canvas.style.height = "auto";
+      app.canvas.style.touchAction = "none";
+      app.canvas.style.cursor = "grab";
 
+      // ---- Camera (ADR-002 D4: wheel zoom + drag pan + fit/1:1) -------
+      // All four content layers live under `camera`, whose scale/position
+      // is the pan/zoom transform; `app.stage` itself stays untransformed.
+      const camera = new Container();
       const mapLayer = new Container();
       const furnitureLayer = new Container();
       const gridLayer = new Container();
       const agentLayer = new Container();
-      app.stage.addChild(mapLayer, furnitureLayer, gridLayer, agentLayer);
+      camera.addChild(mapLayer, furnitureLayer, gridLayer, agentLayer);
+      app.stage.addChild(camera);
+
+      // Current map size in tiles — starts at the viewport's own baseline
+      // and is updated by loadAndBuildMap() once a real map loads.
+      let mapTilesW = VIEWPORT_TILES_W;
+      let mapTilesH = VIEWPORT_TILES_H;
+      let zoom = 1;
+
+      const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+
+      function clampCamera() {
+        const scaledW = mapTilesW * TILE * zoom;
+        const scaledH = mapTilesH * TILE * zoom;
+        camera.x =
+          scaledW <= VIEWPORT_W
+            ? (VIEWPORT_W - scaledW) / 2
+            : Math.min(0, Math.max(VIEWPORT_W - scaledW, camera.x));
+        camera.y =
+          scaledH <= VIEWPORT_H
+            ? (VIEWPORT_H - scaledH) / 2
+            : Math.min(0, Math.max(VIEWPORT_H - scaledH, camera.y));
+      }
+
+      // Zooms so the map point currently under (screenX, screenY) —
+      // viewport pixel coordinates, i.e. already converted from client
+      // (CSS) coordinates — stays under the same point after the zoom.
+      function setZoomAtScreenPoint(nextZoom: number, screenX: number, screenY: number) {
+        const clamped = clampZoom(nextZoom);
+        const worldX = (screenX - camera.x) / zoom;
+        const worldY = (screenY - camera.y) / zoom;
+        zoom = clamped;
+        camera.scale.set(zoom);
+        camera.x = screenX - worldX * zoom;
+        camera.y = screenY - worldY * zoom;
+        clampCamera();
+      }
+
+      function fitView() {
+        zoom = clampZoom(
+          Math.min(VIEWPORT_W / (mapTilesW * TILE), VIEWPORT_H / (mapTilesH * TILE))
+        );
+        camera.scale.set(zoom);
+        clampCamera();
+      }
+
+      function oneToOneView() {
+        zoom = clampZoom(1);
+        camera.scale.set(zoom);
+        clampCamera();
+      }
+
+      fitViewRef.current = fitView;
+      oneToOneViewRef.current = oneToOneView;
+
+      function isEditingNow() {
+        return useGameStore.getState().world?.status === "editing";
+      }
+
+      function screenPointFromClient(clientX: number, clientY: number) {
+        const rect = app!.canvas.getBoundingClientRect();
+        return {
+          x: ((clientX - rect.left) / rect.width) * VIEWPORT_W,
+          y: ((clientY - rect.top) / rect.height) * VIEWPORT_H,
+        };
+      }
+
+      function onWheel(event: WheelEvent) {
+        // Editing mode: back off entirely so this canvas never competes
+        // with the layout editor's own board for wheel/scroll events.
+        if (isEditingNow()) return;
+        event.preventDefault();
+        const { x, y } = screenPointFromClient(event.clientX, event.clientY);
+        setZoomAtScreenPoint(
+          zoom * (event.deltaY < 0 ? WHEEL_ZOOM_STEP : 1 / WHEEL_ZOOM_STEP),
+          x,
+          y
+        );
+      }
+
+      let dragging = false;
+      let dragPointerId: number | null = null;
+      let dragStartClientX = 0;
+      let dragStartClientY = 0;
+      let dragStartCamX = 0;
+      let dragStartCamY = 0;
+
+      function onPointerDown(event: PointerEvent) {
+        if (isEditingNow()) return;
+        dragging = true;
+        dragPointerId = event.pointerId;
+        dragStartClientX = event.clientX;
+        dragStartClientY = event.clientY;
+        dragStartCamX = camera.x;
+        dragStartCamY = camera.y;
+        app!.canvas.setPointerCapture(event.pointerId);
+        app!.canvas.style.cursor = "grabbing";
+        event.preventDefault();
+      }
+
+      function onPointerMove(event: PointerEvent) {
+        if (!dragging || event.pointerId !== dragPointerId) return;
+        const rect = app!.canvas.getBoundingClientRect();
+        camera.x =
+          dragStartCamX + ((event.clientX - dragStartClientX) / rect.width) * VIEWPORT_W;
+        camera.y =
+          dragStartCamY + ((event.clientY - dragStartClientY) / rect.height) * VIEWPORT_H;
+        clampCamera();
+      }
+
+      function endDrag(event: PointerEvent) {
+        if (dragPointerId === null || event.pointerId !== dragPointerId) return;
+        dragging = false;
+        if (app!.canvas.hasPointerCapture(event.pointerId)) {
+          app!.canvas.releasePointerCapture(event.pointerId);
+        }
+        dragPointerId = null;
+        app!.canvas.style.cursor = isEditingNow() ? "default" : "grab";
+      }
+
+      app.canvas.addEventListener("wheel", onWheel, { passive: false });
+      app.canvas.addEventListener("pointerdown", onPointerDown);
+      app.canvas.addEventListener("pointermove", onPointerMove);
+      app.canvas.addEventListener("pointerup", endDrag);
+      app.canvas.addEventListener("pointercancel", endDrag);
+
       let furnitureSprites: FurnitureSpriteCatalog | null = null;
       let lastLayout: LayoutItemRow[] | null = null;
       let lastAgents: Record<string, AgentRow> | null = null;
@@ -420,28 +597,85 @@ export default function OfficeCanvas() {
         }
       });
 
-      // ---- Static map from tmj + tileset -----------------------------
-      const tmj: TmjDoc = await (await fetch("/maps/office_shell.tmj")).json();
-      const tilesetUrl = new URL(
-        tmj.tilesets[0].image,
-        new URL("/maps/", window.location.href)
-      ).pathname;
-      const sheet = (await Assets.load(tilesetUrl)) as Texture;
-      sheet.source.scaleMode = "nearest";
-      const tiles = sliceTileset(sheet, 4);
-      const firstgid = tmj.tilesets[0].firstgid;
-      for (const layer of tmj.layers) {
-        if (layer.type !== "tilelayer") continue;
-        for (let i = 0; i < layer.data.length; i++) {
-          const gid = layer.data[i];
-          if (gid === 0) continue;
-          const tex = tiles[gid - firstgid];
-          if (!tex) continue;
-          const sprite = new Sprite(tex);
-          sprite.x = (i % tmj.width) * TILE;
-          sprite.y = Math.floor(i / tmj.width) * TILE;
-          mapLayer.addChild(sprite);
+      // ---- Map from tmj + tileset -------------------------------------
+      // Live mode: TMJ comes from the store's GET /api/v1/world/map cache
+      // (fetched below / refetched on map_rev change). Mock mode keeps
+      // reading the static fixture file — there's no engine to GET from.
+      async function loadAndBuildMap(tmj: TmjDoc) {
+        const tilesetUrl = new URL(
+          tmj.tilesets[0].image,
+          new URL("/maps/", window.location.href)
+        ).pathname;
+        const sheet = (await Assets.load(tilesetUrl)) as Texture;
+        sheet.source.scaleMode = "nearest";
+        if (cancelled) return;
+        buildMapLayer(tmj, sheet);
+        fitView();
+      }
+
+      function buildMapLayer(tmj: TmjDoc, sheet: Texture) {
+        for (const child of mapLayer.removeChildren()) {
+          child.destroy();
         }
+        const tiles = sliceTileset(sheet, 4);
+        const firstgid = tmj.tilesets[0].firstgid;
+        for (const layer of tmj.layers) {
+          if (layer.type !== "tilelayer") continue;
+          for (let i = 0; i < layer.data.length; i++) {
+            const gid = layer.data[i];
+            if (gid === 0) continue;
+            const tex = tiles[gid - firstgid];
+            if (!tex) continue;
+            const sprite = new Sprite(tex);
+            sprite.x = (i % tmj.width) * TILE;
+            sprite.y = Math.floor(i / tmj.width) * TILE;
+            mapLayer.addChild(sprite);
+          }
+        }
+        mapTilesW = tmj.width;
+        mapTilesH = tmj.height;
+      }
+
+      // Fetches the freshest map when the store's cached `mapRev`
+      // disagrees with the latest `world.map_rev` (subscriber-side
+      // comparison — see notes_for_wave3 for why this beat a store flag).
+      // Also covers the "haven't fetched anything yet" case (`mapTmj ===
+      // null`), since a brand-new store's `mapRev` defaults to `1`, same
+      // as a snapshot that hasn't touched the map — a bare rev compare
+      // would otherwise miss the very first fetch.
+      let mapFetchInFlight = false;
+      async function ensureFreshMap() {
+        if (MOCK_MODE || mapFetchInFlight) return;
+        const state = useGameStore.getState();
+        const wantRev = state.world?.map_rev ?? 1;
+        if (state.mapTmj !== null && wantRev === state.mapRev) return;
+        mapFetchInFlight = true;
+        try {
+          const fresh = await fetchLiveMap();
+          if (fresh && !cancelled) await loadAndBuildMap(fresh);
+        } finally {
+          mapFetchInFlight = false;
+        }
+      }
+
+      let initialTmj: TmjDoc | null = null;
+      if (MOCK_MODE) {
+        try {
+          initialTmj = await (await fetch("/maps/office_shell.tmj")).json();
+        } catch (err) {
+          console.warn("[sim] failed to load mock map", err);
+        }
+      } else {
+        initialTmj = await fetchLiveMap();
+      }
+      if (cancelled) return;
+      if (initialTmj) {
+        await loadAndBuildMap(initialTmj);
+      } else {
+        // No map yet (engine unreachable / world not loaded): establish a
+        // baseline camera at the viewport's own size so fit/1:1 and
+        // wheel/drag still work once ensureFreshMap() picks up a map.
+        fitView();
       }
       if (cancelled) return;
 
@@ -636,7 +870,8 @@ export default function OfficeCanvas() {
         }
         if (editing !== lastEditing) {
           lastEditing = editing;
-          drawGrid(gridLayer, editing);
+          drawGrid(gridLayer, editing, mapTilesW, mapTilesH);
+          if (!dragging) app!.canvas.style.cursor = editing ? "default" : "grab";
         }
         if (agents !== lastAgents) {
           lastAgents = agents;
@@ -650,9 +885,14 @@ export default function OfficeCanvas() {
       };
       const initial = useGameStore.getState();
       applyState(initial.layout, initial.agents, initial.world?.status === "editing");
-      unsubscribe = useGameStore.subscribe((state) =>
-        applyState(state.layout, state.agents, state.world?.status === "editing")
-      );
+      unsubscribe = useGameStore.subscribe((state) => {
+        applyState(state.layout, state.agents, state.world?.status === "editing");
+        // ADR-002 D2: a world_snapshot whose world.map_rev outran the
+        // cached mapRev means /world/map changed under us — refetch and
+        // rebuild mapLayer. No-op in mock mode / while already fetching /
+        // when nothing actually changed (see ensureFreshMap's guard).
+        void ensureFreshMap();
+      });
 
       // Movement interpolation: 1 tile per tick, tick pace from store.
       app.ticker.add((ticker) => {
@@ -687,6 +927,8 @@ export default function OfficeCanvas() {
     return () => {
       cancelled = true;
       if (unsubscribe) unsubscribe();
+      fitViewRef.current = null;
+      oneToOneViewRef.current = null;
       if (app) {
         app.destroy(true);
         app = null;
@@ -695,9 +937,29 @@ export default function OfficeCanvas() {
   }, []);
 
   return (
-    <div
-      ref={hostRef}
-      className="w-full overflow-hidden rounded-lg border border-slate-800 bg-slate-950"
-    />
+    <div className="relative">
+      <div
+        ref={hostRef}
+        className="w-full overflow-hidden rounded-lg border border-slate-800 bg-slate-950"
+      />
+      <div className="pointer-events-none absolute right-2 top-2 flex gap-1">
+        <button
+          type="button"
+          title="縮放至整張地圖"
+          onClick={() => fitViewRef.current?.()}
+          className="pointer-events-auto rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800"
+        >
+          適配
+        </button>
+        <button
+          type="button"
+          title="還原為 1:1 像素縮放"
+          onClick={() => oneToOneViewRef.current?.()}
+          className="pointer-events-auto rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800"
+        >
+          1:1
+        </button>
+      </div>
+    </div>
   );
 }

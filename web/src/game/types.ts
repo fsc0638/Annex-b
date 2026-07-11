@@ -12,6 +12,10 @@ export interface WorldMeta {
   status: "paused" | "running" | "editing" | "archived";
   /** Runtime speed multiplier injected by the server (1|2|5). */
   speed?: number;
+  /** ADR-002 D2: increments on every successful map replace. Optional
+   * because pre-D2 mock snapshots don't carry it — treat a missing value
+   * as `1` (sim-core's own initial value). */
+  map_rev?: number;
 }
 
 export interface AgentRow {
@@ -29,6 +33,9 @@ export interface AgentRow {
   pos_y: number;
   desk_id: string | null;
   llm_profile: Record<string, string>;
+  /** ADR-002 D5: free-text "how this agent replies" customization.
+   * Nullable/optional — pre-migration rows and mock snapshots may omit it. */
+  reply_style?: string | null;
 }
 
 export interface LayoutItemRow {
@@ -81,6 +88,33 @@ export interface WorldSnapshotMsg {
   work_items: WorkItemRow[];
 }
 
+/** Result of a layout save/preview round-trip (LayoutEditorPanel). Not a
+ * wire message from the engine's REST/WS contract today (the real
+ * PUT /world/layout replies with a full world_snapshot, no `validation`
+ * field) — this is the editor's own local-preview/save-result shape,
+ * shuttled through the store via `LayoutUpdatedMsg` below. Left as-is for
+ * Phase 3 wave 2 (see notes_for_wave3); wave 3 reconciles it with the
+ * real engine response shape when it wires the editor's save button to
+ * apiJson("/api/v1/world/layout", ...). */
+export interface LayoutValidation {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+/** Client-local pseudo-message the layout editor feeds back into the
+ * store after a local-preview apply or a (currently editor-only, not yet
+ * engine-matching — see notes_for_wave3) save round-trip. Not sent by the
+ * engine's `/ws`; added to `ServerMsg` purely so
+ * `useGameStore.getState().applyServerMsg({ type: "layout_updated", ... })`
+ * type-checks and updates `layout`/`agents`/`layoutValidation` together. */
+export interface LayoutUpdatedMsg {
+  type: "layout_updated";
+  layout: LayoutItemRow[];
+  agents: AgentRow[];
+  validation: LayoutValidation;
+}
+
 export interface TickMsg {
   type: "tick";
   sim_day: number;
@@ -126,7 +160,8 @@ export type ServerMsg =
   | AgentStatusMsg
   | AgentStuckMsg
   | WorldPausedMsg
-  | ErrorMsg;
+  | ErrorMsg
+  | LayoutUpdatedMsg;
 
 /** Formats a game clock (seconds since 00:00) as "HH:MM". */
 export function formatClock(simClockSec: number): string {

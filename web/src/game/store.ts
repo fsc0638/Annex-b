@@ -6,6 +6,7 @@ import { create } from "zustand";
 import type {
   AgentRow,
   LayoutItemRow,
+  LayoutValidation,
   ServerMsg,
   WorldMeta,
   WorkItemRow,
@@ -23,10 +24,24 @@ export interface GameState {
   speed: number;
   /** Last per-client error message from the server (UI toast). */
   lastError: string | null;
+  /** Result of the layout editor's last local-preview apply or save
+   * round-trip (LayoutEditorPanel), surfaced as inline errors/warnings. */
+  layoutValidation: LayoutValidation | null;
+
+  /** Last TMJ object successfully fetched from `GET /api/v1/world/map`
+   * (live mode) — `null` until OfficeCanvas's first fetch resolves. Mock
+   * mode never populates this (it loads /maps/office_shell.tmj directly). */
+  mapTmj: unknown | null;
+  /** `map_rev` the cached `mapTmj` corresponds to. Defaults to `1` (the
+   * engine's own initial value) so a fresh store compares equal to a
+   * snapshot that hasn't changed the map yet. */
+  mapRev: number;
 
   setConn: (c: ConnState) => void;
   applyServerMsg: (msg: ServerMsg) => void;
   clearError: () => void;
+  /** Called by OfficeCanvas after a successful `GET /api/v1/world/map`. */
+  setMap: (tmj: unknown, rev: number) => void;
 }
 
 export const useGameStore = create<GameState>((set) => ({
@@ -38,9 +53,13 @@ export const useGameStore = create<GameState>((set) => ({
   running: false,
   speed: 1,
   lastError: null,
+  layoutValidation: null,
+  mapTmj: null,
+  mapRev: 1,
 
   setConn: (c) => set({ conn: c }),
   clearError: () => set({ lastError: null }),
+  setMap: (tmj, rev) => set({ mapTmj: tmj, mapRev: rev }),
 
   applyServerMsg: (msg) =>
     set((state) => {
@@ -55,6 +74,15 @@ export const useGameStore = create<GameState>((set) => ({
             workItems: msg.work_items ?? [],
             running: msg.world.status === "running",
             speed: msg.world.speed ?? 1,
+          };
+        }
+        case "layout_updated": {
+          const agents: Record<string, AgentRow> = {};
+          for (const a of msg.agents) agents[a.id] = a;
+          return {
+            layout: msg.layout,
+            agents,
+            layoutValidation: msg.validation,
           };
         }
         case "tick": {
