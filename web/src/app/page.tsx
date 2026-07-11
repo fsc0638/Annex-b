@@ -128,8 +128,8 @@ export default function Home() {
       </div>
 
       <footer className="text-xs text-slate-600">
-        佈局編輯器已可編譯與顯示（深度編輯體驗與世界設定於 Phase 3 wave 3 完成）；
-        角色設定面板目前為唯讀檢視，編輯功能於 wave 3 開通；agent 認知（LLM）於 Phase 2 接入。
+        佈局編輯器：家具擺放、房間大小與背景主題皆可編輯套用（套用會重置當日模擬）；
+        角色設定：名稱／個性／人設／回覆方式／逐層模型皆可編輯。agent 認知（LLM 對話）於 Phase 2 接入。
       </footer>
     </main>
   );
