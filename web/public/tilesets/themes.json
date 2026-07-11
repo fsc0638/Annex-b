@@ -1,0 +1,22 @@
+[
+  {
+    "id": "default",
+    "label": "預設",
+    "file": "/tilesets/office_shell_placeholder.png"
+  },
+  {
+    "id": "warm",
+    "label": "暖色調",
+    "file": "/tilesets/office_shell_theme_warm.png"
+  },
+  {
+    "id": "cool",
+    "label": "冷色調",
+    "file": "/tilesets/office_shell_theme_cool.png"
+  },
+  {
+    "id": "dark",
+    "label": "深色",
+    "file": "/tilesets/office_shell_theme_dark.png"
+  }
+]

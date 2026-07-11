@@ -165,6 +165,7 @@ if command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   )
   GEN_OK=1
   (cd "${REPO_ROOT}" && node scripts/gen_office_shell.mjs) || GEN_OK=0
+  (cd "${REPO_ROOT}" && node scripts/gen_theme_tilesets.mjs) || GEN_OK=0
   (cd "${REPO_ROOT}" && node scripts/gen_world_fixture.mjs) || GEN_OK=0
   (cd "${REPO_ROOT}" && node scripts/gen_agent_sprites.mjs) || GEN_OK=0
   # `git diff --exit-code` only sees changes to TRACKED files; a generator

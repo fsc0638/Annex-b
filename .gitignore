@@ -34,6 +34,28 @@ out/
 assets/tilesets/*
 !assets/tilesets/.gitkeep
 !assets/tilesets/office_shell_placeholder.png
+# ADR-002 D4: 3 new self-made CC0 background theme tilesets
+# (scripts/gen_theme_tilesets.mjs), registered in assets/CREDITS.md.
+!assets/tilesets/office_shell_theme_*.png
+# Un-ignore the LimeZu subdirectory itself so the nested rule below (which
+# selectively re-ignores everything in it except manifest.example.json)
+# can take effect — git will not descend into a directory that a parent
+# pattern already excluded, so this negation is required before that.
+!assets/tilesets/limezu-modern-office/
 assets/sprites/agents/*
 !assets/sprites/agents/.gitkeep
 !assets/sprites/agents/agent_*.png
+
+# LimeZu Modern Office pipeline (ADR-002 D4): the local package a user
+# drops into assets/tilesets/limezu-modern-office/ stays out of version
+# control entirely (paid, per-machine) EXCEPT the committed schema
+# template manifest.example.json. The sync script's copy destination
+# under web/public/ is pure generated output — never committed either.
+assets/tilesets/limezu-modern-office/*
+!assets/tilesets/limezu-modern-office/manifest.example.json
+web/public/tilesets/limezu-modern-office/
+
+# Engine save data (ADR-002 D3: fixture-mode world save file,
+# WORLD_SAVE_PATH default `data/world_save.json`) — local runtime state,
+# never committed.
+data/

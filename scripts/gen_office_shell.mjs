@@ -1,198 +1,78 @@
 #!/usr/bin/env node
-// gen_office_shell.mjs — generates the Phase 1 T1.1 deliverables without
-// Tiled GUI:
+// gen_office_shell.mjs — thin CLI shell around
+// web/src/lib/office_shell_core.mjs (ADR-002 D1: "單一產生器，禁止第二份
+// 產圖邏輯"). All map geometry / validation lives in the core module;
+// this file only handles CLI args, the (default-theme-only) tileset PNG,
+// and writing files to disk.
 //
-//   assets/tilesets/office_shell_placeholder.png   (self-made CC0 tileset)
-//   assets/maps/office_shell.tmj                   (valid Tiled JSON map)
-//   web/public/tilesets/office_shell_placeholder.png (copy for the frontend)
-//   web/public/maps/office_shell.tmj                 (copy for the frontend)
+// Usage:
+//   node scripts/gen_office_shell.mjs [--width N] [--height N]
+//     [--theme default|warm|cool|dark] [--out path/to/file.tmj]
 //
-// Map contents per spec 7.2 / T1.1: 48x32 tiles (32px), floor layer, wall
-// layer (outer ring + windows on the top edge), one main door on the
-// bottom edge center (2 tiles wide, walkable). Wall/window tiles carry a
-// custom boolean property `collides=true` on the embedded tileset.
+// Defaults (--width 48 --height 32 --theme default, no --out): writes the
+// CANONICAL office shell to both
+//   assets/maps/office_shell.tmj + assets/tilesets/office_shell_placeholder.png
+//   web/public/maps/office_shell.tmj + web/public/tilesets/office_shell_placeholder.png
+// This default-parameter output MUST stay byte-identical to the
+// pre-D1 generator's output — ci.sh's determinism layer enforces this via
+// `git diff --exit-code`.
 //
-// The generator validates BEFORE writing (and exits nonzero without
-// writing anything on failure):
-//   1. every furniture footprint from scripts/seed_world.sh stays inside
-//      the interior (never overlaps the wall ring);
-//   2. flood-fill from the door over (walls + non-walkable furniture)
-//      reaches every chair tile and at least one orthogonal neighbor of
-//      every meeting table / pantry counter / printer / cabinet (spec 7.3
-//      validation rule 2 applied to the default layout).
+// When --out is given, only the TMJ JSON is written to that single path
+// (no tileset PNG, no canonical assets/ or web/public/ writes) — this is
+// the mode used to smoke-test non-default sizes/themes without touching
+// the committed canonical files (see scripts/ci.sh's generator layer).
 //
-// Deterministic output: same inputs -> byte-identical files (idempotency
-// is an acceptance criterion). No timestamps, fixed key order, fixed zlib
-// level in the PNG encoder.
+// Furniture-aware validation (bounds + reachability against the real
+// seed layout, scripts/lib/seed_layout.mjs) only runs when width/height
+// match the canonical 48x32 default — the 94 seeded furniture items are
+// laid out for that exact grid and are meaningless at other sizes.
+// Non-default sizes still get office_shell_core's structural flood-fill
+// check (every interior tile reachable from the door).
+//
+// Theme tileset PNGs (warm/cool/dark) are generated separately by
+// scripts/gen_theme_tilesets.mjs — this script only draws/writes the
+// legacy "default" placeholder PNG.
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Canvas } from "./lib/png.mjs";
+import { REPO_ROOT, parseLayoutItems } from "./lib/seed_layout.mjs";
 import {
-  REPO_ROOT,
-  footprint,
-  parseLayoutItems,
-} from "./lib/seed_layout.mjs";
-
-export const MAP_W = 48;
-export const MAP_H = 32;
-export const TILE = 32;
-
-// Door: bottom edge center, 2 tiles wide (spec 7.2 "一扇大門（下緣中央）").
-export const DOOR_TILES = [
-  { x: 23, y: 31 },
-  { x: 24, y: 31 },
-];
-
-// Windows: pairs on the top edge (spec 7.2 "窗（上緣）"). Still collides —
-// you cannot walk through a window.
-const WINDOW_XS = [6, 7, 14, 15, 22, 23, 30, 31, 38, 39];
-
-// Tile ids inside the tileset (gid = firstgid(=1) + id).
-const T_FLOOR = 0;
-const T_WALL = 1;
-const T_WINDOW = 2;
-const T_DOOR = 3;
-const FIRST_GID = 1;
+  DEFAULT_WIDTH,
+  DEFAULT_HEIGHT,
+  TILE,
+  generateOfficeShell,
+} from "../web/src/lib/office_shell_core.mjs";
 
 // ---------------------------------------------------------------------
-// Geometry
+// CLI args
 // ---------------------------------------------------------------------
 
-function isRing(x, y) {
-  return x === 0 || y === 0 || x === MAP_W - 1 || y === MAP_H - 1;
-}
-
-function isDoor(x, y) {
-  return DOOR_TILES.some((d) => d.x === x && d.y === y);
-}
-
-/** Wall-layer tile id for (x,y), or null for empty. */
-function wallTile(x, y) {
-  if (!isRing(x, y)) return null;
-  if (isDoor(x, y)) return null; // walkable opening
-  if (y === 0 && WINDOW_XS.includes(x)) return T_WINDOW;
-  return T_WALL;
-}
-
-function buildLayers() {
-  const floor = new Array(MAP_W * MAP_H);
-  const walls = new Array(MAP_W * MAP_H);
-  for (let y = 0; y < MAP_H; y++) {
-    for (let x = 0; x < MAP_W; x++) {
-      const i = y * MAP_W + x;
-      floor[i] = FIRST_GID + (isDoor(x, y) ? T_DOOR : T_FLOOR);
-      const w = wallTile(x, y);
-      walls[i] = w === null ? 0 : FIRST_GID + w;
-    }
+function parseArgs(argv) {
+  const args = {
+    width: DEFAULT_WIDTH,
+    height: DEFAULT_HEIGHT,
+    theme: "default",
+    out: null,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--width") args.width = Number(argv[++i]);
+    else if (a === "--height") args.height = Number(argv[++i]);
+    else if (a === "--theme") args.theme = argv[++i];
+    else if (a === "--out") args.out = argv[++i];
+    else throw new Error(`gen_office_shell: unknown argument "${a}"`);
   }
-  return { floor, walls };
+  return args;
 }
 
 // ---------------------------------------------------------------------
-// Validation (walls + seed furniture)
+// Default-theme tileset PNG (4 tiles, 128x32): floor / wall / window / door
+// (unchanged from the pre-D1 generator — kept here, not in the core
+// module, because it needs the Node-only PNG encoder).
 // ---------------------------------------------------------------------
 
-function validate(items) {
-  const errors = [];
-
-  // 1. Furniture must stay inside the interior (1..46 x 1..30).
-  for (const item of items) {
-    const fp = footprint(item);
-    if (fp.x < 1 || fp.y < 1 || fp.x + fp.w > MAP_W - 1 || fp.y + fp.h > MAP_H - 1) {
-      errors.push(
-        `furniture ${item.key} footprint (${fp.x},${fp.y} ${fp.w}x${fp.h}) overlaps the wall ring or leaves the map`
-      );
-    }
-  }
-
-  // 2. Flood-fill from the door over walls + non-walkable furniture.
-  const blocked = new Uint8Array(MAP_W * MAP_H);
-  for (let y = 0; y < MAP_H; y++) {
-    for (let x = 0; x < MAP_W; x++) {
-      if (wallTile(x, y) !== null) blocked[y * MAP_W + x] = 1;
-    }
-  }
-  for (const item of items) {
-    if (item.walkable) continue;
-    const fp = footprint(item);
-    for (let y = fp.y; y < fp.y + fp.h; y++) {
-      for (let x = fp.x; x < fp.x + fp.w; x++) {
-        blocked[y * MAP_W + x] = 1;
-      }
-    }
-  }
-
-  const reached = new Uint8Array(MAP_W * MAP_H);
-  const queue = [];
-  for (const d of DOOR_TILES) {
-    if (!blocked[d.y * MAP_W + d.x]) {
-      reached[d.y * MAP_W + d.x] = 1;
-      queue.push([d.x, d.y]);
-    }
-  }
-  while (queue.length > 0) {
-    const [x, y] = queue.shift();
-    for (const [dx, dy] of [
-      [0, -1],
-      [1, 0],
-      [0, 1],
-      [-1, 0],
-    ]) {
-      const nx = x + dx;
-      const ny = y + dy;
-      if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) continue;
-      const i = ny * MAP_W + nx;
-      if (blocked[i] || reached[i]) continue;
-      reached[i] = 1;
-      queue.push([nx, ny]);
-    }
-  }
-
-  // 2a. Every chair tile must be reached (agents must be able to sit).
-  for (const item of items) {
-    if (item.kind !== "chair") continue;
-    if (!reached[item.pos_y * MAP_W + item.pos_x]) {
-      errors.push(`chair ${item.key} at (${item.pos_x},${item.pos_y}) unreachable from door`);
-    }
-  }
-
-  // 2b. Key interaction targets need >=1 reachable orthogonal neighbor
-  //     (spec 7.3 rule 2: meeting 區, pantry, printer, cabinet 可達).
-  const mustBeAdjacent = items.filter((it) =>
-    ["meeting_table", "pantry_counter", "printer", "cabinet", "whiteboard"].includes(
-      it.kind
-    )
-  );
-  for (const item of mustBeAdjacent) {
-    const fp = footprint(item);
-    let ok = false;
-    for (let y = fp.y - 1; y <= fp.y + fp.h && !ok; y++) {
-      for (let x = fp.x - 1; x <= fp.x + fp.w && !ok; x++) {
-        const inFp =
-          x >= fp.x && x < fp.x + fp.w && y >= fp.y && y < fp.y + fp.h;
-        if (inFp) continue;
-        // Orthogonal neighbors only: same row or same column as footprint.
-        const orth =
-          (x >= fp.x && x < fp.x + fp.w) || (y >= fp.y && y < fp.y + fp.h);
-        if (!orth) continue;
-        if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) continue;
-        if (reached[y * MAP_W + x]) ok = true;
-      }
-    }
-    if (!ok) {
-      errors.push(`${item.kind} ${item.key} has no reachable adjacent tile`);
-    }
-  }
-
-  return errors;
-}
-
-// ---------------------------------------------------------------------
-// Tileset PNG (4 tiles, 128x32): floor / wall / window / door
-// ---------------------------------------------------------------------
-
-function drawTileset() {
+function drawDefaultTileset() {
   const c = new Canvas(TILE * 4, TILE);
 
   // Tile 0: floor — warm light grey with a subtle 1px grid line top/left.
@@ -221,114 +101,51 @@ function drawTileset() {
 }
 
 // ---------------------------------------------------------------------
-// Tiled JSON (.tmj) with embedded tileset
-// ---------------------------------------------------------------------
-
-function buildTmj(layers) {
-  return {
-    compressionlevel: -1,
-    height: MAP_H,
-    infinite: false,
-    layers: [
-      {
-        data: layers.floor,
-        height: MAP_H,
-        id: 1,
-        name: "floor",
-        opacity: 1,
-        type: "tilelayer",
-        visible: true,
-        width: MAP_W,
-        x: 0,
-        y: 0,
-      },
-      {
-        data: layers.walls,
-        height: MAP_H,
-        id: 2,
-        name: "walls",
-        opacity: 1,
-        type: "tilelayer",
-        visible: true,
-        width: MAP_W,
-        x: 0,
-        y: 0,
-      },
-    ],
-    nextlayerid: 3,
-    nextobjectid: 1,
-    orientation: "orthogonal",
-    renderorder: "right-down",
-    tiledversion: "1.10.2",
-    tileheight: TILE,
-    tilesets: [
-      {
-        columns: 4,
-        firstgid: FIRST_GID,
-        image: "../tilesets/office_shell_placeholder.png",
-        imageheight: TILE,
-        imagewidth: TILE * 4,
-        margin: 0,
-        name: "office_shell_placeholder",
-        spacing: 0,
-        tilecount: 4,
-        tileheight: TILE,
-        tilewidth: TILE,
-        tiles: [
-          {
-            id: T_WALL,
-            properties: [{ name: "collides", type: "bool", value: true }],
-          },
-          {
-            id: T_WINDOW,
-            properties: [{ name: "collides", type: "bool", value: true }],
-          },
-        ],
-      },
-    ],
-    tilewidth: TILE,
-    type: "map",
-    version: "1.10",
-    width: MAP_W,
-  };
-}
-
-// ---------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------
 
 function main() {
-  const items = parseLayoutItems();
-  const errors = validate(items);
-  if (errors.length > 0) {
-    console.error("gen_office_shell: validation FAILED, nothing written:");
-    for (const e of errors) console.error(`  - ${e}`);
+  const { width, height, theme, out } = parseArgs(process.argv.slice(2));
+
+  const isCanonicalSize = width === DEFAULT_WIDTH && height === DEFAULT_HEIGHT;
+  // The 94 seeded furniture items are laid out for the exact 48x32
+  // canonical grid; only pass them into the validator at that size.
+  const layoutItems = isCanonicalSize ? parseLayoutItems() : [];
+
+  let tmjObj;
+  try {
+    tmjObj = generateOfficeShell({ width, height, theme, layoutItems });
+  } catch (err) {
+    console.error(`gen_office_shell: validation FAILED, nothing written:\n  ${err.message}`);
     process.exit(1);
   }
 
-  const layers = buildLayers();
-  const tmj = JSON.stringify(buildTmj(layers), null, 2) + "\n";
-  const png = drawTileset();
+  const tmj = JSON.stringify(tmjObj, null, 2) + "\n";
 
-  const targets = [
-    { dir: join(REPO_ROOT, "assets") },
-    { dir: join(REPO_ROOT, "web", "public") },
-  ];
-  for (const t of targets) {
-    mkdirSync(join(t.dir, "maps"), { recursive: true });
-    mkdirSync(join(t.dir, "tilesets"), { recursive: true });
-    writeFileSync(join(t.dir, "maps", "office_shell.tmj"), tmj);
-    writeFileSync(
-      join(t.dir, "tilesets", "office_shell_placeholder.png"),
-      png
-    );
+  if (out) {
+    writeFileSync(out, tmj);
+    console.log(`gen_office_shell: OK — wrote ${width}x${height} (theme=${theme}) map to ${out}`);
+    return;
+  }
+
+  const targets = [join(REPO_ROOT, "assets"), join(REPO_ROOT, "web", "public")];
+  for (const dir of targets) {
+    mkdirSync(join(dir, "maps"), { recursive: true });
+    writeFileSync(join(dir, "maps", "office_shell.tmj"), tmj);
+  }
+
+  if (theme === "default") {
+    const png = drawDefaultTileset();
+    for (const dir of targets) {
+      mkdirSync(join(dir, "tilesets"), { recursive: true });
+      writeFileSync(join(dir, "tilesets", "office_shell_placeholder.png"), png);
+    }
   }
 
   console.log(
-    `gen_office_shell: OK — ${MAP_W}x${MAP_H} map, door at ${DOOR_TILES.map(
-      (d) => `(${d.x},${d.y})`
-    ).join(" ")}, ${WINDOW_XS.length} window tiles, validation passed ` +
-      `(${items.length} furniture items checked). Wrote assets/ and web/public/.`
+    `gen_office_shell: OK — ${width}x${height} map (theme=${theme}), ` +
+      `${isCanonicalSize ? `${layoutItems.length} furniture items checked` : "no furniture check (non-canonical size)"}. ` +
+      `Wrote assets/ and web/public/.`
   );
 }
 

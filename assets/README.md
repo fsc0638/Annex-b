@@ -29,17 +29,28 @@ assets/
 
 1. 前往 itch.io 搜尋 LimeZu「Modern Office」（或「Modern Interiors」）資產包。
 2. 免費層即可先行測試；若需要更多辦公家具變化，購買完整版。
-3. 下載後，將 tileset 圖檔（`.png`）與對應 Tiled tileset 定義檔（`.tsx`，若有）
-   放到本機：
+3. 下載後，將整包內容放到本機：
    ```
    assets/tilesets/limezu-modern-office/
    ```
-   此路徑已被 `.gitignore` 排除（見下方規則），不會被誤 commit。
-4. 在 Tiled 中製作 `assets/maps/office_shell.tmj` 時引用上述本機路徑的
-   tileset；`.tmj` 檔本身（不含圖檔）可以入 repo，因為它只是引用路徑與
-   座標資料，不含素材原檔本體。
-5. 若團隊多人開發，每個人各自依本說明在本機放置一份 LimeZu 素材，不透過
-   git 同步。
+   此路徑內容已被 `.gitignore` 排除（見下方規則）——**只有**
+   `manifest.example.json`（schema 範本，見下一步）例外會進版控，不會被誤
+   commit 真正的圖檔。
+4. 複製 schema 範本並依你實際下載的檔名編輯：
+   ```
+   cp assets/tilesets/limezu-modern-office/manifest.example.json \
+      assets/tilesets/limezu-modern-office/manifest.json
+   ```
+   （`manifest.example.json` 內的 `_comment`/`_schema_comment` 欄位說明每個
+   欄位的意義；`sprites` 的 key 必須是編輯器認得的 10 種家具種類之一。）
+5. 執行 `node scripts/sync_limezu_assets.mjs` 把 manifest.json 引用的檔案
+   複製到 `web/public/tilesets/limezu-modern-office/`（同樣被 `.gitignore`
+   整個排除）並產生前端可讀的 manifest.json；缺 `manifest.json` 或整個
+   來源目錄時，此腳本會印出明確的下一步指引（不報錯）。地圖底圖本身不再
+   靠 Tiled GUI 手動製作——由 `scripts/gen_office_shell.mjs` 產生（見
+   `docs/CLAUDE.md` Phase 1 決策段）。
+6. 若團隊多人開發，每個人各自依本說明在本機放置一份 LimeZu 素材與自己的
+   `manifest.json`，不透過 git 同步。
 
 ## .gitignore 規則（防止誤 commit 付費素材）
 

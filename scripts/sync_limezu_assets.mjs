@@ -165,15 +165,28 @@ async function collectSingleMaterials() {
 
 async function main() {
   if (!(await exists(sourceDir))) {
-    logSkip(`source directory not found: ${sourceDir}`);
+    logSkip(
+      `LimeZu source directory not found: ${sourceDir}\n` +
+        `  This is expected until you've bought/placed the LimeZu "Modern Office" package —\n` +
+        `  see assets/README.md ("LimeZu 購買與放置說明") for where to get it. Next steps:\n` +
+        `    1. mkdir -p "${sourceDir}"\n` +
+        `    2. extract your downloaded LimeZu package into that folder\n` +
+        `    3. cp "${path.join(sourceDir, "manifest.example.json")}" "${sourceManifestPath}"\n` +
+        `       and edit the sprite \`file\` paths to match your extracted filenames\n` +
+        `    4. re-run: node scripts/sync_limezu_assets.mjs\n` +
+        `  Until then, the layout editor's furniture palette falls back to plain color blocks.`
+    );
     return;
   }
   if (!(await exists(sourceManifestPath))) {
     logSkip(
-      `manifest.json not found. Copy ${path.join(
-        sourceDir,
-        "manifest.example.json"
-      )} to manifest.json and map it to your LimeZu files.`
+      `manifest.json not found at ${sourceManifestPath}.\n` +
+        `  Next step: cp "${path.join(
+          sourceDir,
+          "manifest.example.json"
+        )}" "${sourceManifestPath}" and edit the sprite \`file\` paths to match your\n` +
+        `  extracted LimeZu filenames (see the _comment/_schema_comment fields in that\n` +
+        `  template for the expected shape), then re-run: node scripts/sync_limezu_assets.mjs`
     );
     return;
   }

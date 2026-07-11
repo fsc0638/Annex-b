@@ -1,0 +1,46 @@
+{
+  "_comment": "TEMPLATE — copy this file to manifest.json in this same directory (assets/tilesets/limezu-modern-office/) and edit the `file` path in each sprite entry to match the actual filenames inside your downloaded LimeZu 'Modern Office' package (see ../../README.md section 'LimeZu 購買與放置說明' for where to place the package). After editing, run `node scripts/sync_limezu_assets.mjs` to copy the referenced files into web/public/tilesets/limezu-modern-office/ and generate the web-consumable manifest.json there. This file itself (manifest.example.json) is committed to the repo as documentation/schema reference and is never read by the sync script — only manifest.json (gitignored, machine-local) is.",
+  "_schema_comment": "`sprites` is an object keyed by furniture kind. Keys MUST be one of the 10 LayoutKind values consumed by web/src/panels/LayoutEditorPanel.tsx (see its `KINDS` array): desk, exec_desk, chair, partition, meeting_table, cabinet, printer, plant, pantry_counter, whiteboard. Unrecognized keys are silently ignored by sync_limezu_assets.mjs (isLayoutKind() guard). Each sprite entry: `file` (required, string) — path to the PNG, relative to this directory; `fit` (optional, 'contain'|'cover'|'stretch') — how the editor's furniture-palette thumbnail should fit the image, defaults to 'contain'; `scale` (optional, number) — extra size multiplier when the sprite is drawn on the layout board; `offsetX`/`offsetY` (optional, number) — pixel offset to align the sprite's visual origin with its logical tile anchor. Any other keys are passed through unchanged into the generated web manifest but are not currently consumed by the editor.",
+  "sprites": {
+    "desk": {
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_210.png",
+      "fit": "contain"
+    },
+    "exec_desk": {
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_245.png",
+      "fit": "contain"
+    },
+    "chair": {
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_101.png",
+      "fit": "contain"
+    },
+    "partition": {
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_010.png",
+      "fit": "contain"
+    },
+    "meeting_table": {
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_188.png",
+      "fit": "contain"
+    },
+    "cabinet": {
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_120.png",
+      "fit": "contain"
+    },
+    "printer": {
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_147.png",
+      "fit": "contain"
+    },
+    "plant": {
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_098.png",
+      "fit": "contain"
+    },
+    "pantry_counter": {
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_165.png",
+      "fit": "contain"
+    },
+    "whiteboard": {
+      "file": "Modern_Office_Revamped_v1.2/4_Modern_Office_singles/32x32/single_169.png",
+      "fit": "contain"
+    }
+  }
+}
