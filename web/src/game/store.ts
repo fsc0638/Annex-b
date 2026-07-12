@@ -5,6 +5,7 @@
 import { create } from "zustand";
 import type {
   AgentRow,
+  FurnitureManifest,
   LayoutItemRow,
   LayoutValidation,
   ServerMsg,
@@ -13,6 +14,13 @@ import type {
 } from "./types";
 
 export type ConnState = "connecting" | "open" | "closed" | "mock";
+
+export type FurnitureManifestStatus = "idle" | "loading" | "ok" | "missing";
+
+// ADR-003 D1/D2: single source URL for the LimeZu furniture asset manifest,
+// shared by LayoutEditorPanel (material browser) and OfficeCanvas
+// (furniture sprites) via the store instead of each fetching it separately.
+const FURNITURE_MANIFEST_URL = "/tilesets/limezu-modern-office/manifest.json";
 
 /** The main shell's three tabs (app/page.tsx). Mirrored into the store so
  * OfficeCanvas — whose camera handlers live outside React's render tree —
@@ -65,6 +73,13 @@ export interface GameState {
    * tab being the one actually on screen. */
   activeTab: AppTab;
 
+  /** Parsed LimeZu furniture manifest (ADR-003 D1/D2), or `null` before the
+   * first successful fetch / when the asset package isn't synced. Shared
+   * between LayoutEditorPanel's material browser and OfficeCanvas's
+   * furniture sprite renderer — see `ensureFurnitureManifestLoaded`. */
+  furnitureManifest: FurnitureManifest | null;
+  furnitureManifestStatus: FurnitureManifestStatus;
+
   setConn: (c: ConnState) => void;
   applyServerMsg: (msg: ServerMsg) => void;
   clearError: () => void;
@@ -74,9 +89,17 @@ export interface GameState {
   setEditorActive: (active: boolean) => void;
   /** Called only by app/page.tsx's tab bar — see `activeTab` above. */
   setActiveTab: (tab: AppTab) => void;
+  /** Idempotent: fetches `GET /tilesets/limezu-modern-office/manifest.json`
+   * once and caches the parsed result in the store. Safe to call from every
+   * component that needs the manifest (LayoutEditorPanel on mount,
+   * OfficeCanvas on mount) — only the first caller while status is "idle"
+   * actually issues the fetch (the `set` that flips it to "loading" is
+   * synchronous, so even two calls in the same render tick can't race into
+   * a double-fetch); later callers just read the cached result/status. */
+  ensureFurnitureManifestLoaded: () => void;
 }
 
-export const useGameStore = create<GameState>((set) => ({
+export const useGameStore = create<GameState>((set, get) => ({
   conn: "connecting",
   world: null,
   agents: {},
@@ -91,12 +114,36 @@ export const useGameStore = create<GameState>((set) => ({
   editorActive: false,
   worldSnapshotSeq: 0,
   activeTab: "monitor",
+  furnitureManifest: null,
+  furnitureManifestStatus: "idle",
 
   setConn: (c) => set({ conn: c }),
   clearError: () => set({ lastError: null }),
   setMap: (tmj, rev) => set({ mapTmj: tmj, mapRev: rev }),
   setEditorActive: (active) => set({ editorActive: active }),
   setActiveTab: (tab) => set({ activeTab: tab }),
+  ensureFurnitureManifestLoaded: () => {
+    if (get().furnitureManifestStatus !== "idle") return;
+    set({ furnitureManifestStatus: "loading" });
+    fetch(FURNITURE_MANIFEST_URL, { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((manifest: FurnitureManifest | null) => {
+        if (
+          manifest &&
+          typeof manifest === "object" &&
+          manifest.sprites &&
+          Array.isArray(manifest.catalog) &&
+          Array.isArray(manifest.categories)
+        ) {
+          set({ furnitureManifest: manifest, furnitureManifestStatus: "ok" });
+        } else {
+          set({ furnitureManifest: null, furnitureManifestStatus: "missing" });
+        }
+      })
+      .catch(() => {
+        set({ furnitureManifest: null, furnitureManifestStatus: "missing" });
+      });
+  },
 
   applyServerMsg: (msg) =>
     set((state) => {

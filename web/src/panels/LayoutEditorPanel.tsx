@@ -13,6 +13,7 @@ import { useGameStore } from "@/game/store";
 import {
   footprintOf,
   type AgentRow,
+  type FurnitureManifestEntry,
   type LayoutItemRow,
   type LayoutValidation,
   type WorldSnapshotMsg,
@@ -54,8 +55,12 @@ const VIEW_PADDING = 2;
 const MIN_VIEW_W = 12;
 const MIN_VIEW_H = 8;
 const LAYOUT_MATERIAL_MIME = "application/x-annex-b-layout-material";
-const FURNITURE_MANIFEST_URL = "/tilesets/limezu-modern-office/manifest.json";
 const THEMES_URL = "/tilesets/themes.json";
+// ADR-003 D2: the material browser must never render/load the whole
+// catalog (5809+ entries) at once — only the current category/search page.
+// 90 sits in the middle of the 60-120 spec'd range.
+const MATERIAL_PAGE_SIZE = 90;
+const DEFAULT_MATERIAL_CATEGORY = "office";
 const WORLD_RESET_CONFIRM_MESSAGE =
   "套用後模擬將重置至當日 07:00（暫停），所有角色回到通勤起點。確定要套用嗎？";
 
@@ -99,26 +104,14 @@ interface ViewBounds {
   h: number;
 }
 
-interface FurnitureSpriteManifestEntry {
-  id?: string;
-  label?: string;
-  file?: string;
-  image?: string;
-  fit?: "contain" | "cover" | "stretch";
-  scale?: number;
-  offsetX?: number;
-  offsetY?: number;
-}
+// Local alias: the shared manifest-entry shape (types.ts) covers both this
+// panel's flat catalog thumbnails and OfficeCanvas's Pixi sprite loading.
+type FurnitureSpriteManifestEntry = FurnitureManifestEntry;
 
 interface FurnitureMaterial extends FurnitureSpriteManifestEntry {
   id: string;
   label: string;
   kind?: LayoutKind;
-}
-
-interface FurnitureSpriteManifest {
-  sprites?: Record<string, FurnitureSpriteManifestEntry>;
-  catalog?: FurnitureMaterial[];
 }
 
 type FurnitureSpriteCatalog = Partial<
@@ -162,12 +155,19 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
   const [message, setMessage] = useState<string | null>(null);
   const [autoView, setAutoView] = useState(true);
   const [lockedViewBounds, setLockedViewBounds] = useState<ViewBounds | null>(null);
-  const [furnitureSprites, setFurnitureSprites] =
-    useState<FurnitureSpriteCatalog | null>(null);
-  const [furnitureMaterials, setFurnitureMaterials] = useState<FurnitureMaterial[]>([]);
-  const [manifestStatus, setManifestStatus] = useState<"loading" | "ok" | "missing">(
-    "loading"
+  // ADR-003 D2: the manifest itself now lives in the store (shared with
+  // OfficeCanvas — see store.ts's `ensureFurnitureManifestLoaded`) instead
+  // of being fetched independently by this panel.
+  const furnitureManifest = useGameStore((state) => state.furnitureManifest);
+  const furnitureManifestStatus = useGameStore((state) => state.furnitureManifestStatus);
+  const ensureFurnitureManifestLoaded = useGameStore(
+    (state) => state.ensureFurnitureManifestLoaded
   );
+  const [materialCategory, setMaterialCategory] = useState<string>(
+    DEFAULT_MATERIAL_CATEGORY
+  );
+  const [materialSearch, setMaterialSearch] = useState("");
+  const [materialPage, setMaterialPage] = useState(0);
   const [themeOptions, setThemeOptions] = useState<ThemeOption[]>([]);
   const [worldWidthInput, setWorldWidthInput] = useState(FALLBACK_MAP_W);
   const [worldHeightInput, setWorldHeightInput] = useState(FALLBACK_MAP_H);
@@ -228,22 +228,6 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
     [autoView, rows, mapDims, fullBounds]
   );
   const activeViewBounds = lockedViewBounds ?? viewBounds;
-  const materialOptions = useMemo(
-    () =>
-      furnitureMaterials.length > 0
-        ? furnitureMaterials
-        : KINDS.map((value) => ({
-            id: `kind:${value}`,
-            label: labelForKind(value),
-            kind: value,
-            ...furnitureSprites?.[value],
-          })),
-    [furnitureMaterials, furnitureSprites]
-  );
-  const selectedMaterial =
-    materialOptions.find((material) => material.id === selectedMaterialId) ??
-    materialOptions.find((material) => material.kind === kind) ??
-    null;
 
   const rememberDraftBase = useCallback(() => {
     if (draftBaseLayoutRef.current) return;
@@ -253,60 +237,123 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
   }, [agents, layout, running]);
 
   useEffect(() => {
-    let cancelled = false;
-    fetch(FURNITURE_MANIFEST_URL, { cache: "no-store" })
-      .then((response) => {
-        if (!response.ok) {
-          // 404 (package not synced) or any other non-2xx: degrade to the
-          // generated placeholders and surface the install-guidance banner
-          // instead of failing silently (ADR-002 D4).
-          if (!cancelled) setManifestStatus("missing");
-          return null;
-        }
-        return response.json();
-      })
-      .then((manifest: FurnitureSpriteManifest | null) => {
-        if (cancelled) return;
-        // W5 fix: `manifest === null` means the earlier !response.ok branch
-        // already set "missing" above — nothing more to do. But a 200 with
-        // valid JSON that's simply the WRONG shape (no `sprites` object)
-        // fell through here silently before this fix, leaving
-        // manifestStatus stuck at "loading" forever (so the install-
-        // guidance banner never appeared). Treat that shape mismatch the
-        // same as a fetch failure: "missing".
-        if (manifest === null) return;
-        if (!manifest.sprites) {
-          setManifestStatus("missing");
-          return;
-        }
-        const catalog: FurnitureSpriteCatalog = {};
-        for (const [value, sprite] of Object.entries(manifest.sprites)) {
-          if (isLayoutKind(value) && sprite.image) {
-            catalog[value] = sprite;
-          }
-        }
-        setFurnitureSprites(catalog);
-        setFurnitureMaterials(
-          (manifest.catalog ?? [])
-            .filter((material) => material.id && material.label && material.image)
-            .map((material) => ({
-              ...material,
-              kind: material.kind && isLayoutKind(material.kind) ? material.kind : undefined,
-            }))
-        );
-        setManifestStatus("ok");
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setFurnitureSprites(null);
-          setFurnitureMaterials([]);
-          setManifestStatus("missing");
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    ensureFurnitureManifestLoaded();
+  }, [ensureFurnitureManifestLoaded]);
+
+  // W5-equivalent: "missing" covers both a fetch failure/404 (package not
+  // synced) and a 200 with the wrong shape — either way the install-
+  // guidance banner below must show instead of hanging on "loading"
+  // forever. "idle" (not requested yet, shouldn't really be observable
+  // once the effect above has run) also reads as "loading" for display.
+  const manifestStatus: "loading" | "ok" | "missing" =
+    furnitureManifestStatus === "missing" ? "missing" : furnitureManifestStatus === "ok" ? "ok" : "loading";
+
+  const furnitureSprites: FurnitureSpriteCatalog | null = useMemo(() => {
+    if (!furnitureManifest) return null;
+    const catalog: FurnitureSpriteCatalog = {};
+    for (const [value, sprite] of Object.entries(furnitureManifest.sprites)) {
+      if (isLayoutKind(value) && sprite.image) {
+        catalog[value] = sprite;
+      }
+    }
+    return catalog;
+  }, [furnitureManifest]);
+
+  // Full, unpaged catalog — kept around (as plain data, never all rendered
+  // as <img> at once) so material selection/lookup by id stays stable
+  // across category switches and pagination (see `materialsById` below).
+  const furnitureCatalog: FurnitureMaterial[] = useMemo(() => {
+    if (!furnitureManifest) return [];
+    return furnitureManifest.catalog
+      .filter(
+        (material): material is FurnitureManifestEntry & { id: string; label: string; image: string } =>
+          Boolean(material.id && material.label && material.image)
+      )
+      .map((material) => ({
+        ...material,
+        kind: material.kind && isLayoutKind(material.kind) ? material.kind : undefined,
+      }));
+  }, [furnitureManifest]);
+
+  const materialsById = useMemo(() => {
+    const map = new Map<string, FurnitureMaterial>();
+    for (const material of furnitureCatalog) map.set(material.id, material);
+    return map;
+  }, [furnitureCatalog]);
+
+  const materialCategories = furnitureManifest?.categories ?? [];
+  const usingCatalog = furnitureCatalog.length > 0;
+
+  // ADR-003 D2: category ∩ keyword search over the full (unrendered)
+  // catalog array — cheap (a filter over plain objects), unlike rendering
+  // thumbnails. Only the current page of THIS result gets turned into
+  // <img> elements below.
+  const filteredCatalog = useMemo(() => {
+    if (!usingCatalog) return [];
+    const needle = materialSearch.trim().toLowerCase();
+    return furnitureCatalog.filter((material) => {
+      if (materialCategory && material.category && material.category !== materialCategory) {
+        return false;
+      }
+      if (!needle) return true;
+      return (
+        material.label.toLowerCase().includes(needle) ||
+        (material.kind ?? "").toLowerCase().includes(needle) ||
+        (material.categoryLabel ?? "").toLowerCase().includes(needle)
+      );
+    });
+  }, [usingCatalog, furnitureCatalog, materialCategory, materialSearch]);
+
+  const materialPageCount = Math.max(1, Math.ceil(filteredCatalog.length / MATERIAL_PAGE_SIZE));
+  const materialPageClamped = Math.min(materialPage, materialPageCount - 1);
+
+  // Windowed slice actually rendered as thumbnails — this (not the full
+  // catalog/filteredCatalog) is what MUST stay small; it caps how many
+  // <img> tags ever exist in the DOM at once.
+  const pagedCatalog = useMemo(
+    () =>
+      filteredCatalog.slice(
+        materialPageClamped * MATERIAL_PAGE_SIZE,
+        (materialPageClamped + 1) * MATERIAL_PAGE_SIZE
+      ),
+    [filteredCatalog, materialPageClamped]
+  );
+
+  useEffect(() => {
+    setMaterialPage(0);
+  }, [materialCategory, materialSearch]);
+
+  // What the thumbnail grid actually renders: the current page when a real
+  // catalog is loaded, else the 10 generated-placeholder kind swatches
+  // (ADR-002 D4 fallback — unchanged when the asset package isn't synced).
+  const materialOptions: FurnitureMaterial[] = useMemo(
+    () =>
+      usingCatalog
+        ? pagedCatalog
+        : KINDS.map((value) => ({
+            // `kind` must come AFTER the spread: `furnitureSprites?.[value]`
+            // is a `FurnitureManifestEntry`, whose `kind` field (only ever
+            // populated on catalog entries, never on the by-kind sprite
+            // map) would otherwise widen this literal's `kind` from
+            // `LayoutKind` to `string` for type-checking purposes.
+            id: `kind:${value}`,
+            label: labelForKind(value),
+            ...furnitureSprites?.[value],
+            kind: value,
+          })),
+    [usingCatalog, pagedCatalog, furnitureSprites]
+  );
+  // Selection lookup deliberately goes through the FULL catalog
+  // (`materialsById`), not the current page — switching category/search
+  // must not silently drop an already-selected material out from under
+  // "套用素材到選取" / the next placement.
+  const selectedMaterial =
+    (usingCatalog ? materialsById.get(selectedMaterialId) : undefined) ??
+    materialOptions.find((material) => material.id === selectedMaterialId) ??
+    (usingCatalog
+      ? furnitureCatalog.find((material) => material.kind === kind)
+      : materialOptions.find((material) => material.kind === kind)) ??
+    null;
 
   useEffect(() => {
     let cancelled = false;
@@ -516,7 +563,15 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
   ): FurnitureMaterial | null {
     const materialId = event.dataTransfer.getData(LAYOUT_MATERIAL_MIME);
     if (!materialId) return null;
-    return materialOptions.find((material) => material.id === materialId) ?? null;
+    // Full-catalog lookup (not just the currently rendered page) — a drag
+    // always starts from a rendered thumbnail, but resolving by id here
+    // rather than trusting `materialOptions` keeps this correct even if
+    // the page/category changed between dragstart and drop.
+    return (
+      (usingCatalog ? materialsById.get(materialId) : undefined) ??
+      materialOptions.find((material) => material.id === materialId) ??
+      null
+    );
   }
 
   function dropMaterial(event: DragEvent<HTMLDivElement>) {
@@ -983,7 +1038,11 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
         <div className="space-y-2">
           <div className="flex items-center justify-between text-xs text-slate-400">
             <span>素材庫</span>
-            <span>{materialOptions.length} 張</span>
+            <span>
+              {usingCatalog
+                ? `${filteredCatalog.length} 件（共 ${furnitureCatalog.length}）`
+                : `${materialOptions.length} 張`}
+            </span>
           </div>
           {manifestStatus === "missing" && (
             <div className="rounded-md border border-sky-900 bg-sky-950/40 px-2 py-1.5 text-[11px] leading-snug text-sky-300">
@@ -991,6 +1050,28 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
               assets/tilesets/limezu-modern-office/（參考同目錄
               manifest.example.json），執行 node
               scripts/sync_limezu_assets.mjs 後重新整理。目前顯示為產生的色塊佔位圖。
+            </div>
+          )}
+          {usingCatalog && (
+            <div className="space-y-1.5">
+              <select
+                value={materialCategory}
+                onChange={(event) => setMaterialCategory(event.target.value)}
+                className="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs"
+              >
+                {materialCategories.map((category) => (
+                  <option key={category.slug} value={category.slug}>
+                    {category.label}（{category.count}）
+                  </option>
+                ))}
+              </select>
+              <input
+                type="search"
+                value={materialSearch}
+                onChange={(event) => setMaterialSearch(event.target.value)}
+                placeholder="搜尋名稱／種類…"
+                className="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs"
+              />
             </div>
           )}
           <div className="grid max-h-80 grid-cols-3 gap-2 overflow-auto pr-1">
@@ -1030,6 +1111,31 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
             );
             })}
           </div>
+          {usingCatalog && materialPageCount > 1 && (
+            <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400">
+              <button
+                type="button"
+                disabled={materialPageClamped <= 0}
+                onClick={() => setMaterialPage((page) => Math.max(0, page - 1))}
+                className="rounded-md border border-slate-700 px-2 py-1 disabled:opacity-30"
+              >
+                上一頁
+              </button>
+              <span>
+                第 {materialPageClamped + 1} / {materialPageCount} 頁
+              </span>
+              <button
+                type="button"
+                disabled={materialPageClamped >= materialPageCount - 1}
+                onClick={() =>
+                  setMaterialPage((page) => Math.min(materialPageCount - 1, page + 1))
+                }
+                className="rounded-md border border-slate-700 px-2 py-1 disabled:opacity-30"
+              >
+                下一頁
+              </button>
+            </div>
+          )}
           <div className="grid grid-cols-[1fr_auto] gap-2">
             <select
               value={kind}
@@ -1365,6 +1471,8 @@ function MaterialPreview({
         src={sprite.image}
         alt=""
         draggable={false}
+        loading="lazy"
+        decoding="async"
         className="h-full w-full"
         style={{
           imageRendering: "pixelated",

@@ -24,7 +24,13 @@ import {
 } from "pixi.js";
 import { apiJson } from "@/api/client";
 import { useGameStore } from "./store";
-import { footprintOf, type AgentRow, type LayoutItemRow } from "./types";
+import {
+  footprintOf,
+  type AgentRow,
+  type FurnitureManifest,
+  type FurnitureManifestEntry,
+  type LayoutItemRow,
+} from "./types";
 
 const TILE = 32;
 
@@ -73,8 +79,6 @@ const FURNITURE_COLORS: Record<LayoutItemRow["kind"], number> = {
   whiteboard: 0xe8e8ec,
 };
 
-const LIMEZU_FURNITURE_MANIFEST_URL =
-  "/tilesets/limezu-modern-office/manifest.json";
 const FURNITURE_KINDS = new Set(
   Object.keys(FURNITURE_COLORS) as LayoutItemRow["kind"][]
 );
@@ -82,37 +86,12 @@ let furnitureSpriteLoadWarned = false;
 
 type FurnitureSpriteFit = "contain" | "cover" | "stretch";
 
-interface FurnitureSpriteManifestEntry {
-  id?: string;
-  label?: string;
-  file?: string;
-  image?: string;
-  x?: number;
-  y?: number;
-  w?: number;
-  h?: number;
-  fit?: FurnitureSpriteFit;
-  scale?: number;
-  offsetX?: number;
-  offsetY?: number;
-}
-
-interface LimeZuFurnitureManifest {
-  sprites?: Record<string, FurnitureSpriteManifestEntry>;
-  catalog?: FurnitureSpriteManifestEntry[];
-}
-
 interface FurnitureSpriteEntry {
   texture: Texture;
   fit: FurnitureSpriteFit;
   scale: number;
   offsetX: number;
   offsetY: number;
-}
-
-interface FurnitureSpriteCatalog {
-  byKind: Partial<Record<LayoutItemRow["kind"], FurnitureSpriteEntry>>;
-  byId: Record<string, FurnitureSpriteEntry>;
 }
 
 interface AgentVisual {
@@ -170,83 +149,57 @@ function warnFurnitureSpriteLoadFailure(err: unknown) {
   if (furnitureSpriteLoadWarned) return;
   furnitureSpriteLoadWarned = true;
   console.warn(
-    "[sim] LimeZu furniture manifest unavailable; using generated placeholders",
+    "[sim] LimeZu furniture sprite failed to load; using generated placeholder",
     err
   );
 }
 
-async function loadFurnitureSprites(): Promise<FurnitureSpriteCatalog | null> {
+// ADR-003 D2: the manifest itself (sprites/catalog/categories JSON) is
+// fetched once and shared via the store (`ensureFurnitureManifestLoaded`,
+// also used by LayoutEditorPanel's material browser) — this module no
+// longer does its own `fetch`. What stays local to this module is turning
+// manifest entries into Pixi *textures*, which is done lazily/on-demand
+// (see `ensureMaterialSprite` below) instead of eagerly walking the whole
+// (5800+ entry) catalog at mount: a given map only ever places a handful
+// of distinct materials, so there is no reason to pre-decode thousands of
+// PNGs nobody is using.
+//
+// `Assets.load` dedupes concurrent/repeated loads of the same URL via its
+// own global cache, so this is safe to call redundantly — callers
+// additionally gate on their own id-keyed cache (`materialTextureCache`
+// below, mirroring the agent-visual `visuals`/`resolvedVisuals` pattern)
+// so a given material is only ever requested once per mount, not once per
+// tile per redraw.
+async function loadSpriteEntry(
+  spriteDef: FurnitureManifestEntry
+): Promise<FurnitureSpriteEntry | null> {
+  if (!spriteDef.image) return null;
   try {
-    const response = await fetch(LIMEZU_FURNITURE_MANIFEST_URL, {
-      cache: "no-store",
-    });
-    if (response.status === 404) return null;
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status} while loading furniture manifest`);
-    }
-
-    const manifest = (await response.json()) as LimeZuFurnitureManifest;
-    const sprites = manifest.sprites ?? {};
-    const textureCache = new Map<string, Promise<Texture>>();
-    const catalog: FurnitureSpriteCatalog = { byKind: {}, byId: {} };
-
-    const loadSpriteEntry = async (
-      spriteDef: FurnitureSpriteManifestEntry
-    ): Promise<FurnitureSpriteEntry | null> => {
-      if (!spriteDef.image) return null;
-      let pendingTexture = textureCache.get(spriteDef.image);
-      if (!pendingTexture) {
-        pendingTexture = Assets.load(spriteDef.image).then((texture) => {
-          const loaded = texture as Texture;
-          loaded.source.scaleMode = "nearest";
-          return loaded;
-        });
-        textureCache.set(spriteDef.image, pendingTexture);
-      }
-      const baseTexture = await pendingTexture;
-      const hasFrame =
-        spriteDef.x !== undefined ||
-        spriteDef.y !== undefined ||
-        spriteDef.w !== undefined ||
-        spriteDef.h !== undefined;
-      const texture = hasFrame
-        ? new Texture({
-            source: baseTexture.source,
-            frame: new Rectangle(
-              spriteDef.x ?? 0,
-              spriteDef.y ?? 0,
-              spriteDef.w ?? TILE,
-              spriteDef.h ?? TILE
-            ),
-          })
-        : baseTexture;
-      return {
-        texture,
-        fit: spriteDef.fit ?? "contain",
-        scale: spriteDef.scale ?? 1,
-        offsetX: spriteDef.offsetX ?? 0,
-        offsetY: spriteDef.offsetY ?? 0,
-      };
+    const baseTexture = (await Assets.load(spriteDef.image)) as Texture;
+    baseTexture.source.scaleMode = "nearest";
+    const hasFrame =
+      spriteDef.x !== undefined ||
+      spriteDef.y !== undefined ||
+      spriteDef.w !== undefined ||
+      spriteDef.h !== undefined;
+    const texture = hasFrame
+      ? new Texture({
+          source: baseTexture.source,
+          frame: new Rectangle(
+            spriteDef.x ?? 0,
+            spriteDef.y ?? 0,
+            spriteDef.w ?? TILE,
+            spriteDef.h ?? TILE
+          ),
+        })
+      : baseTexture;
+    return {
+      texture,
+      fit: spriteDef.fit ?? "contain",
+      scale: spriteDef.scale ?? 1,
+      offsetX: spriteDef.offsetX ?? 0,
+      offsetY: spriteDef.offsetY ?? 0,
     };
-
-    for (const [kind, spriteDef] of Object.entries(sprites)) {
-      if (!isFurnitureKind(kind) || !spriteDef.image) continue;
-      const spriteEntry = await loadSpriteEntry(spriteDef);
-      if (spriteEntry) catalog.byKind[kind] = spriteEntry;
-    }
-
-    for (const material of manifest.catalog ?? []) {
-      if (!material.id && !material.image) continue;
-      const spriteEntry = await loadSpriteEntry(material);
-      if (!spriteEntry) continue;
-      if (material.id) catalog.byId[material.id] = spriteEntry;
-      if (material.image) catalog.byId[material.image] = spriteEntry;
-    }
-
-    return Object.keys(catalog.byKind).length > 0 ||
-      Object.keys(catalog.byId).length > 0
-      ? catalog
-      : null;
   } catch (err) {
     warnFurnitureSpriteLoadFailure(err);
     return null;
@@ -304,65 +257,36 @@ function addFurnitureSprite(
   spriteLayer.addChild(sprite);
 }
 
-function spriteEntryForItem(
-  item: LayoutItemRow,
-  sprites: FurnitureSpriteCatalog
-): FurnitureSpriteEntry | undefined {
-  const spriteMeta = readSpriteMeta(item.meta);
-  if (spriteMeta?.id && sprites.byId[spriteMeta.id]) {
-    return sprites.byId[spriteMeta.id];
-  }
-  if (spriteMeta?.image && sprites.byId[spriteMeta.image]) {
-    return sprites.byId[spriteMeta.image];
-  }
-  return sprites.byKind[item.kind];
+// Full sprite meta (fit/scale/offset included, not just id/image) so the
+// lazy per-material loader below can build a correctly-fitted
+// FurnitureSpriteEntry straight from what LayoutEditorPanel stored.
+function readSpriteMeta(meta: unknown): FurnitureManifestEntry | undefined {
+  if (!isPlainRecord(meta)) return undefined;
+  const sprite = meta.sprite;
+  if (!isPlainRecord(sprite) || typeof sprite.image !== "string") return undefined;
+  return {
+    id: typeof sprite.id === "string" ? sprite.id : undefined,
+    label: typeof sprite.label === "string" ? sprite.label : undefined,
+    file: typeof sprite.file === "string" ? sprite.file : undefined,
+    image: sprite.image,
+    fit:
+      sprite.fit === "contain" || sprite.fit === "cover" || sprite.fit === "stretch"
+        ? sprite.fit
+        : "contain",
+    scale: typeof sprite.scale === "number" ? sprite.scale : undefined,
+    offsetX: typeof sprite.offsetX === "number" ? sprite.offsetX : undefined,
+    offsetY: typeof sprite.offsetY === "number" ? sprite.offsetY : undefined,
+  };
 }
 
-function readSpriteMeta(meta: unknown): { id?: string; image?: string } | null {
-  if (!isPlainRecord(meta)) return null;
-  const sprite = meta.sprite;
-  if (!isPlainRecord(sprite)) return null;
-  const id = typeof sprite.id === "string" ? sprite.id : undefined;
-  const image = typeof sprite.image === "string" ? sprite.image : undefined;
-  return id || image ? { id, image } : null;
+/** Cache key for one material: id when present (stable across a manifest
+ * regen that might reshuffle paths), else the image URL. */
+function materialKeyFor(spriteMeta: FurnitureManifestEntry): string {
+  return spriteMeta.id ?? spriteMeta.image ?? "";
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function drawFurniture(
-  container: Container,
-  layout: LayoutItemRow[],
-  sprites?: FurnitureSpriteCatalog | null
-) {
-  // Keep one persistent Graphics for fallback placeholders. Sprite children are
-  // destroyed on each layout redraw, while the Graphics is cleared in place to
-  // avoid leaking GPU geometry during frequent world_snapshot updates.
-  let g = container.children[0] as Graphics | undefined;
-  let spriteLayer = container.children[1] as Container | undefined;
-  if (!g) {
-    g = new Graphics();
-    container.addChild(g);
-  } else {
-    g.clear();
-  }
-  if (!spriteLayer) {
-    spriteLayer = new Container();
-    container.addChild(spriteLayer);
-  }
-  for (const child of spriteLayer.removeChildren()) {
-    child.destroy({ children: true });
-  }
-
-  for (const item of layout) {
-    const spriteDef = sprites ? spriteEntryForItem(item, sprites) : undefined;
-    if (spriteDef) {
-      addFurnitureSprite(spriteLayer, spriteDef, item);
-    } else {
-      drawFurniturePlaceholder(g, item);
-    }
-  }
 }
 
 function drawGrid(
@@ -606,18 +530,114 @@ export default function OfficeCanvas() {
       app.canvas.addEventListener("pointerup", endDrag);
       app.canvas.addEventListener("pointercancel", endDrag);
 
-      let furnitureSprites: FurnitureSpriteCatalog | null = null;
       let lastLayout: LayoutItemRow[] | null = null;
       let lastAgents: Record<string, AgentRow> | null = null;
       let lastEditing = false;
+      let lastFurnitureManifest: FurnitureManifest | null = null;
 
-      void loadFurnitureSprites().then((sprites) => {
-        if (cancelled) return;
-        furnitureSprites = sprites;
-        if (lastLayout) {
-          drawFurniture(furnitureLayer, lastLayout, furnitureSprites);
+      // ---- Furniture sprites (ADR-003 D2) ------------------------------
+      // Kind-level defaults (10 entries, from manifest.sprites) are small
+      // enough to load eagerly whenever the manifest becomes available.
+      // Per-material sprites (an item's own `meta.sprite`, chosen in
+      // LayoutEditorPanel) stay lazy: a map might reference any of the
+      // manifest's 5800+ catalog entries, but only ever a handful at once,
+      // so each is fetched only the first time an actual layout item needs
+      // it — mirrors the agent-visual `visuals`/`resolvedVisuals`
+      // pending/resolved pair further below (register the promise
+      // synchronously so concurrent draws of the same item can't double-fetch).
+      let kindSprites: Partial<Record<LayoutItemRow["kind"], FurnitureSpriteEntry>> = {};
+      const materialTextureCache = new Map<string, Promise<FurnitureSpriteEntry | null>>();
+      const resolvedMaterialTextures = new Map<string, FurnitureSpriteEntry>();
+
+      function ensureMaterialTexture(key: string, spriteMeta: FurnitureManifestEntry) {
+        if (!key || materialTextureCache.has(key)) return;
+        const pending = loadSpriteEntry(spriteMeta).then((entry) => {
+          if (cancelled) return entry;
+          if (entry) {
+            resolvedMaterialTextures.set(key, entry);
+            // Upgrade whatever was already drawn (kind default / color
+            // block) to the real material now that it's ready.
+            if (lastLayout) drawFurniture(furnitureLayer, lastLayout);
+          }
+          return entry;
+        });
+        materialTextureCache.set(key, pending);
+      }
+
+      function spriteEntryForItem(item: LayoutItemRow): FurnitureSpriteEntry | undefined {
+        const spriteMeta = readSpriteMeta(item.meta);
+        if (spriteMeta) {
+          const key = materialKeyFor(spriteMeta);
+          const resolved = key ? resolvedMaterialTextures.get(key) : undefined;
+          if (resolved) return resolved;
+          // Not loaded yet: kick off the (idempotent, per-key) load and,
+          // for THIS frame, fall through to the kind-level default rather
+          // than the flat color block — closer to the final look while the
+          // specific material streams in, and `drawFurniture` re-runs once
+          // it resolves.
+          ensureMaterialTexture(key, spriteMeta);
         }
-      });
+        return kindSprites[item.kind];
+      }
+
+      function drawFurniture(container: Container, layout: LayoutItemRow[]) {
+        // Keep one persistent Graphics for fallback placeholders. Sprite
+        // children are destroyed on each layout redraw, while the Graphics
+        // is cleared in place to avoid leaking GPU geometry during frequent
+        // world_snapshot updates.
+        let g = container.children[0] as Graphics | undefined;
+        let spriteLayer = container.children[1] as Container | undefined;
+        if (!g) {
+          g = new Graphics();
+          container.addChild(g);
+        } else {
+          g.clear();
+        }
+        if (!spriteLayer) {
+          spriteLayer = new Container();
+          container.addChild(spriteLayer);
+        }
+        for (const child of spriteLayer.removeChildren()) {
+          child.destroy({ children: true });
+        }
+
+        for (const item of layout) {
+          const spriteDef = spriteEntryForItem(item);
+          if (spriteDef) {
+            addFurnitureSprite(spriteLayer, spriteDef, item);
+          } else {
+            drawFurniturePlaceholder(g, item);
+          }
+        }
+      }
+
+      async function applyFurnitureManifest(manifest: FurnitureManifest) {
+        const byKind: Partial<Record<LayoutItemRow["kind"], FurnitureSpriteEntry>> = {};
+        for (const [kind, spriteDef] of Object.entries(manifest.sprites ?? {})) {
+          if (!isFurnitureKind(kind) || !spriteDef.image) continue;
+          const entry = await loadSpriteEntry(spriteDef);
+          if (entry) byKind[kind] = entry;
+        }
+        if (cancelled) return;
+        kindSprites = byKind;
+        if (lastLayout) drawFurniture(furnitureLayer, lastLayout);
+      }
+
+      // ADR-003 D2: idempotent across components — if LayoutEditorPanel (or
+      // an earlier mount of this component) already triggered the fetch,
+      // this is a no-op and we just read whatever's already cached/loading.
+      // NOTE: this `getState()` read right after kicking off the fetch is
+      // realistically ALWAYS null (the fetch can't resolve synchronously) —
+      // it's a harmless fast-path, not the real load path. The manifest
+      // actually gets applied by the equivalent check placed right before
+      // `useGameStore.subscribe()` below, which is what closes the race
+      // that caused the color-block regression (see the comment there).
+      useGameStore.getState().ensureFurnitureManifestLoaded();
+      const initialFurnitureManifest = useGameStore.getState().furnitureManifest;
+      if (initialFurnitureManifest) {
+        lastFurnitureManifest = initialFurnitureManifest;
+        void applyFurnitureManifest(initialFurnitureManifest);
+      }
 
       // ---- Map from tmj + tileset -------------------------------------
       // Live mode: TMJ comes from the store's GET /api/v1/world/map cache
@@ -899,7 +919,7 @@ export default function OfficeCanvas() {
       ) => {
         if (layout !== lastLayout) {
           lastLayout = layout;
-          drawFurniture(furnitureLayer, layout, furnitureSprites);
+          drawFurniture(furnitureLayer, layout);
         }
         if (editing !== lastEditing) {
           lastEditing = editing;
@@ -926,6 +946,25 @@ export default function OfficeCanvas() {
         initial.agents,
         initial.editorActive && initial.activeTab === "editor"
       );
+      // Bug fix (color-block regression): the manifest fetch kicked off
+      // above (`ensureFurnitureManifestLoaded`) is async, so
+      // `initialFurnitureManifest` (captured immediately afterward) was
+      // always null — the fetch can't have resolved yet at that point. But
+      // everything between there and here (loadAndBuildMap/fetchLiveMap
+      // etc.) awaits real network/decode work, which is plenty of time for
+      // the manifest fetch to resolve and update the store WHILE THIS
+      // COMPONENT WASN'T SUBSCRIBED YET. zustand's `subscribe()` below only
+      // fires on state changes that happen AFTER it's registered, so that
+      // already-applied update would otherwise be missed forever, leaving
+      // `kindSprites` empty and every furniture item stuck on the flat-
+      // color placeholder. Re-check the CURRENT state right before
+      // subscribing — same pattern `applyState(initial...)` above already
+      // uses for layout/agents/editorActive — so a manifest that arrived
+      // during the gap still gets applied.
+      if (initial.furnitureManifest && initial.furnitureManifest !== lastFurnitureManifest) {
+        lastFurnitureManifest = initial.furnitureManifest;
+        void applyFurnitureManifest(initial.furnitureManifest);
+      }
       unsubscribe = useGameStore.subscribe((state) => {
         applyState(
           state.layout,
@@ -937,6 +976,15 @@ export default function OfficeCanvas() {
         // rebuild mapLayer. No-op in mock mode / while already fetching /
         // when nothing actually changed (see ensureFreshMap's guard).
         void ensureFreshMap();
+        // ADR-003 D2: the manifest may still be loading when this effect
+        // first ran (e.g. LayoutEditorPanel's mount effect fired first and
+        // its fetch hasn't resolved yet) — pick it up as soon as the store
+        // has it, whichever component's `ensureFurnitureManifestLoaded`
+        // call actually issued the fetch.
+        if (state.furnitureManifest && state.furnitureManifest !== lastFurnitureManifest) {
+          lastFurnitureManifest = state.furnitureManifest;
+          void applyFurnitureManifest(state.furnitureManifest);
+        }
       });
 
       // Movement interpolation: 1 tile per tick, tick pace from store.

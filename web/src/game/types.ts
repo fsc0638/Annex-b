@@ -36,6 +36,11 @@ export interface AgentRow {
   /** ADR-002 D5: free-text "how this agent replies" customization.
    * Nullable/optional — pre-migration rows and mock snapshots may omit it. */
   reply_style?: string | null;
+  /** Character appearance layers (backend already ships this on
+   * world_snapshot as of the character-backend rollout). Type-only for
+   * now — actual sprite composition/rendering is a future wave; do not
+   * wire this into OfficeCanvas rendering yet. */
+  appearance?: Record<string, string | null> | null;
 }
 
 export interface LayoutItemRow {
@@ -63,6 +68,47 @@ export interface LayoutItemRow {
   walkable: boolean;
   affords: string[];
   meta: unknown;
+}
+
+/** LimeZu furniture asset manifest shape — GET
+ * /tilesets/limezu-modern-office/manifest.json (ADR-003 D1). A static
+ * asset catalog, not part of the engine's wire protocol; fetched once via
+ * the store's `furnitureManifest` state (`ensureFurnitureManifestLoaded`)
+ * so LayoutEditorPanel's material browser and OfficeCanvas's furniture
+ * sprite loader share a single fetch instead of two independent ones. */
+export interface FurnitureManifestEntry {
+  id?: string;
+  label?: string;
+  file?: string;
+  image?: string;
+  /** Catalog entries only: heuristically-inferred LayoutItemRow["kind"]. */
+  kind?: string;
+  /** Catalog entries only: theme category slug/label (ADR-003 D1). */
+  category?: string;
+  categoryLabel?: string;
+  /** Optional sub-frame crop within `image` — unused by the current sync
+   * script's output (every catalog entry is a standalone 32x32 PNG) but
+   * kept for a future spritesheet-backed manifest. */
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+  fit?: "contain" | "cover" | "stretch";
+  scale?: number;
+  offsetX?: number;
+  offsetY?: number;
+}
+
+export interface FurnitureManifestCategory {
+  slug: string;
+  label: string;
+  count: number;
+}
+
+export interface FurnitureManifest {
+  sprites: Record<string, FurnitureManifestEntry>;
+  catalog: FurnitureManifestEntry[];
+  categories: FurnitureManifestCategory[];
 }
 
 export interface WorkItemRow {
