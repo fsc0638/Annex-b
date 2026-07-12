@@ -75,6 +75,7 @@ mod tests {
             pos_y: 0,
             desk_id: None,
             llm_profile: serde_json::json!({}),
+            appearance: None,
         }
     }
 

@@ -55,6 +55,13 @@ assets/tilesets/limezu-modern-office/*
 !assets/tilesets/limezu-modern-office/manifest.example.json
 web/public/tilesets/limezu-modern-office/
 
+# LimeZu Character Generator pieces (ADR-003 D3/D4): scripts/
+# sync_character_pieces.mjs copies purchased, per-machine part sheets into
+# this directory — generated output only, never committed (same "paid
+# asset" rule as the furniture pipeline above; the source folder itself is
+# already covered by the limezu-modern-office/* rule above).
+web/public/character/
+
 # Engine save data (ADR-002 D3: fixture-mode world save file,
 # WORLD_SAVE_PATH default `data/world_save.json`) — local runtime state,
 # never committed.

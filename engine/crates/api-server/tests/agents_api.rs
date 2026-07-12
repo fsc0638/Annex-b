@@ -132,6 +132,157 @@ async fn patch_agent_rejects_l0_override_with_422() {
     assert!(json["error"]["message"].as_str().unwrap().contains("L0"));
 }
 
+// ---- ADR-003 D3: appearance PATCH acceptance ---------------------------
+
+/// Mirrors `patch_agent_updates_fields_and_broadcasts_without_resetting_world`
+/// above, but for `appearance` — full end-to-end: PATCH accepts a valid
+/// appearance object, the response snapshot carries it, it is broadcast,
+/// and it is persisted to the fixture save file.
+#[tokio::test]
+async fn patch_agent_updates_appearance_and_persists() {
+    let _guard = ENV_MUTEX.lock().await;
+    let tmp_path = point_world_save_path_at_tmp();
+
+    let (state, handle) = test_state();
+    let mut rx = handle.events.subscribe();
+    let agent_id = {
+        let world = handle.world.lock().await;
+        world.agents[0].agent.id
+    };
+    let app = build_router(state);
+
+    let body = serde_json::json!({
+        "appearance": {
+            "body": "body-01",
+            "eyes": "eyes-03",
+            "hairstyle": "hairstyle-01-01",
+            "outfit": "outfit-05-02",
+            "accessory": null
+        }
+    })
+    .to_string();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/v1/agents/{agent_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let patched = json["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == agent_id.to_string())
+        .unwrap();
+    assert_eq!(patched["appearance"]["body"], "body-01");
+    assert_eq!(patched["appearance"]["hairstyle"], "hairstyle-01-01");
+    assert!(patched["appearance"]["accessory"].is_null());
+
+    let broadcast = rx.try_recv().expect("a snapshot was broadcast");
+    let v: serde_json::Value = serde_json::from_str(&broadcast).unwrap();
+    let broadcast_agent = v["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == agent_id.to_string())
+        .unwrap();
+    assert_eq!(broadcast_agent["appearance"]["body"], "body-01");
+
+    assert!(
+        tmp_path.exists(),
+        "PATCH must persist the fixture save file"
+    );
+    std::fs::remove_dir_all(tmp_path.parent().unwrap()).ok();
+}
+
+/// A second PATCH sending `"appearance": null` must clear a previously-set
+/// appearance back to null (the double-Option "whole-object replace"
+/// semantics documented on `sim_core::world::AgentPatch::appearance`), not
+/// merely leave the prior value untouched.
+#[tokio::test]
+async fn patch_agent_can_clear_appearance_to_null() {
+    let (state, handle) = test_state();
+    let agent_id = {
+        let world = handle.world.lock().await;
+        world.agents[0].agent.id
+    };
+    let app = build_router(state);
+
+    let set_body = serde_json::json!({ "appearance": {"body": "body-02"} }).to_string();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/v1/agents/{agent_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(set_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let clear_body = serde_json::json!({ "appearance": null }).to_string();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/v1/agents/{agent_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(clear_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    let patched = json["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == agent_id.to_string())
+        .unwrap();
+    assert!(
+        patched["appearance"].is_null(),
+        "explicit null must clear appearance: {patched}"
+    );
+}
+
+#[tokio::test]
+async fn patch_agent_rejects_unknown_appearance_layer_with_422() {
+    let (state, handle) = test_state();
+    let agent_id = {
+        let world = handle.world.lock().await;
+        world.agents[0].agent.id
+    };
+    let app = build_router(state);
+
+    let body = serde_json::json!({ "appearance": {"hat": "hat-01"} }).to_string();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/v1/agents/{agent_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "validation_failed");
+    assert!(json["error"]["message"].as_str().unwrap().contains("hat"));
+}
+
 #[tokio::test]
 async fn patch_agent_rejects_duplicate_name_with_422() {
     let (state, handle) = test_state();

@@ -76,6 +76,34 @@ pub struct AgentPatch {
     pub core_identity: Option<String>,
     pub reply_style: Option<String>,
     pub llm_profile: Option<serde_json::Value>,
+    /// ADR-003 D3: whole-object replace, nullable ("整包替換，nullable").
+    /// Unlike every other field above (single `Option`, where `None` always
+    /// means "field absent from the JSON body, leave untouched"), this is a
+    /// double `Option` so the three JSON states are all distinguishable:
+    /// - key absent from the body → deserializes to `None` (outer) via
+    ///   `#[serde(default)]` — untouched, same as every other field.
+    /// - key present with value `null` → `Some(None)` — clears the agent's
+    ///   appearance back to "use the placeholder sprite".
+    /// - key present with an object → `Some(Some(value))` — replaces the
+    ///   whole appearance object (shape validated by the caller via
+    ///   `appearance::validate_appearance`, same division of labor as
+    ///   `llm_profile`: sim-core enforces existence/uniqueness rules it can,
+    ///   the API layer validates payload shape before calling in).
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub appearance: Option<Option<serde_json::Value>>,
+}
+
+/// Deserializes a present JSON value (including `null`) into `Some(value)`,
+/// leaving "key absent" to `#[serde(default)]` produce the outer `None` —
+/// the standard trick for giving a `PATCH` field three states (absent /
+/// null / value) with a plain `Option<Option<T>>` and no extra dependency.
+fn deserialize_double_option<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<serde_json::Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone)]
@@ -340,6 +368,11 @@ impl WorldState {
         }
         if let Some(v) = patch.llm_profile {
             sim.agent.llm_profile = v;
+        }
+        if let Some(v) = patch.appearance {
+            // v: Option<Value> — None clears to placeholder, Some(x) replaces
+            // whole-object (see AgentPatch::appearance's doc comment).
+            sim.agent.appearance = v;
         }
         Ok(())
     }
@@ -725,6 +758,7 @@ mod tests {
             pos_y: 0,
             desk_id: Some(desk_id),
             llm_profile: serde_json::json!({}),
+            appearance: None,
         }
     }
 
@@ -1070,6 +1104,7 @@ mod tests {
                 core_identity: None,
                 reply_style: Some("簡短有力".into()),
                 llm_profile: Some(serde_json::json!({"L2": "openai:gpt-4o-mini"})),
+                appearance: Some(Some(serde_json::json!({"body": "body-01"}))),
             },
         )
         .expect("valid patch");
@@ -1082,6 +1117,10 @@ mod tests {
         );
         assert_eq!(ws.agents[0].agent.reply_style.as_deref(), Some("簡短有力"));
         assert_eq!(ws.agents[0].agent.llm_profile["L2"], "openai:gpt-4o-mini");
+        assert_eq!(
+            ws.agents[0].agent.appearance,
+            Some(serde_json::json!({"body": "body-01"}))
+        );
         assert_eq!(
             ws.world.status, status_before,
             "PATCH must not reset the world"

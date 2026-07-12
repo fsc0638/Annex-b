@@ -41,6 +41,7 @@ create table agents (
   pos_y          int  not null,
   desk_id        uuid,               -- ★ 指派座位（layout_items.id），可為 null
   llm_profile    jsonb not null default '{}', -- ★★v2.1 按角色指派模型，如 {"L1":"openai:gpt-4o-mini","L3":"gemini:gemini-2.5-pro"}；空物件＝走第6章 tier 預設
+  appearance     jsonb,              -- ★★ADR-003 D3：角色外觀分層選擇，如 {"body":"body-01","eyes":"eyes-03","hairstyle":"hairstyle-01-01","outfit":"outfit-05-02","accessory":null}；nullable，null＝沿用程式產生的佔位 sprite
   created_at     timestamptz not null default now()
 );
 

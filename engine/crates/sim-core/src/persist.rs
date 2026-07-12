@@ -18,6 +18,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::appearance::validate_appearance;
 use crate::llm_profile::validate_llm_profile;
 use crate::world::{AgentPatch, WorldState};
 use crate::LayoutItem;
@@ -41,6 +42,11 @@ pub struct AgentOverride {
     pub core_identity: String,
     pub reply_style: Option<String>,
     pub llm_profile: serde_json::Value,
+    /// ADR-003 D3. `#[serde(default)]` so a save file written before this
+    /// field existed still loads (missing → `None`, same "use the
+    /// placeholder sprite" meaning as an explicit `null`).
+    #[serde(default)]
+    pub appearance: Option<serde_json::Value>,
 }
 
 /// Compile-time default resolves relative to this crate's manifest dir,
@@ -71,6 +77,7 @@ pub fn build_save_file(ws: &WorldState) -> WorldSaveFile {
                 core_identity: a.agent.core_identity.clone(),
                 reply_style: a.agent.reply_style.clone(),
                 llm_profile: a.agent.llm_profile.clone(),
+                appearance: a.agent.appearance.clone(),
             })
             .collect(),
     }
@@ -162,6 +169,26 @@ pub fn apply_save_file(base: &WorldState, save: WorldSaveFile) -> Result<WorldSt
                 serde_json::json!({})
             }
         };
+        // Same defensive-load treatment as llm_profile above: a hand-edited
+        // save file could otherwise resurrect an appearance object
+        // `PATCH /agents/:id` would have rejected (ADR-003 D3). `None`
+        // (no appearance saved) skips validation entirely — nothing to
+        // validate, and clearing an already-absent value is a no-op anyway.
+        let appearance = match &ov.appearance {
+            None => None,
+            Some(v) => match validate_appearance(v) {
+                Ok(()) => Some(v.clone()),
+                Err(reason) => {
+                    tracing::warn!(
+                        agent_id = %ov.id,
+                        reason = %reason,
+                        "world save has an invalid appearance override; clearing it for this \
+                         agent (other fields and agents are kept)"
+                    );
+                    None
+                }
+            },
+        };
         ws.patch_agent(
             ov.id,
             AgentPatch {
@@ -170,6 +197,7 @@ pub fn apply_save_file(base: &WorldState, save: WorldSaveFile) -> Result<WorldSt
                 core_identity: Some(ov.core_identity),
                 reply_style: ov.reply_style,
                 llm_profile: Some(llm_profile),
+                appearance: Some(appearance),
             },
         )?;
     }
@@ -437,6 +465,148 @@ mod tests {
         assert_eq!(
             good.agent.llm_profile,
             serde_json::json!({"L1": "openai:gpt-4o-mini"}),
+            "a valid override on another agent is preserved as-is"
+        );
+    }
+
+    // ---- ADR-003 D3: appearance patch/persist roundtrip ----------------
+
+    /// Mirrors `round_trips_through_save_and_load` above, but for
+    /// `appearance` instead of `reply_style`.
+    #[test]
+    fn appearance_round_trips_through_save_and_load() {
+        let mut ws = fixture_world();
+        let id = ws.agents[0].agent.id;
+        let appearance = serde_json::json!({
+            "body": "body-01",
+            "eyes": "eyes-03",
+            "hairstyle": "hairstyle-01-01",
+            "outfit": "outfit-05-02",
+            "accessory": null
+        });
+        ws.patch_agent(
+            id,
+            AgentPatch {
+                appearance: Some(Some(appearance.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let dir =
+            std::env::temp_dir().join(format!("sim-core-persist-appearance-{}", Uuid::new_v4()));
+        let path = dir.join("world_save.json");
+        let path_str = path.to_str().unwrap().to_string();
+
+        save_to_path(&ws, &path_str).expect("save succeeds");
+        assert!(path.exists());
+
+        let base = fixture_world();
+        let loaded = try_load_and_apply(&base, &path_str)
+            .expect("load succeeds")
+            .expect("file exists, so Some(..)");
+        let loaded_agent = loaded.agents.iter().find(|a| a.agent.id == id).unwrap();
+        assert_eq!(loaded_agent.agent.appearance, Some(appearance));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `patch_agent`'s double-Option semantics for `appearance`: providing
+    /// `Some(None)` (JSON `null` on the wire) must clear a previously-set
+    /// appearance back to `None`, not merely leave it untouched — the field
+    /// is a whole-object replace, unlike every other `AgentPatch` field.
+    #[test]
+    fn patch_agent_can_clear_appearance_back_to_null() {
+        let mut ws = fixture_world();
+        let id = ws.agents[0].agent.id;
+        ws.patch_agent(
+            id,
+            AgentPatch {
+                appearance: Some(Some(serde_json::json!({"body": "body-01"}))),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(ws.agent_by_id(id).unwrap().agent.appearance.is_some());
+
+        ws.patch_agent(
+            id,
+            AgentPatch {
+                appearance: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            ws.agent_by_id(id).unwrap().agent.appearance,
+            None,
+            "Some(None) (JSON null) must clear appearance, not leave it untouched"
+        );
+    }
+
+    /// A patch that never mentions `appearance` at all (`AgentPatch::default()`
+    /// via `..Default::default()`, i.e. the outer `None`) must leave a
+    /// previously-set appearance completely untouched.
+    #[test]
+    fn patch_agent_omitting_appearance_leaves_it_untouched() {
+        let mut ws = fixture_world();
+        let id = ws.agents[0].agent.id;
+        let appearance = serde_json::json!({"body": "body-02"});
+        ws.patch_agent(
+            id,
+            AgentPatch {
+                appearance: Some(Some(appearance.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        ws.patch_agent(
+            id,
+            AgentPatch {
+                reply_style: Some("換個語氣".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            ws.agent_by_id(id).unwrap().agent.appearance,
+            Some(appearance)
+        );
+    }
+
+    /// Mirrors `invalid_agent_llm_profile_is_cleared_not_rejected`: a save
+    /// file whose agent override carries an invalid `appearance` (unknown
+    /// layer key) must still load — only that agent's `appearance` is
+    /// cleared to `None`, every other field and agent is untouched.
+    #[test]
+    fn invalid_agent_appearance_is_cleared_not_rejected() {
+        let base = fixture_world();
+        let mut save = build_save_file(&base);
+        let bad_id = save.agents[0].id;
+        let good_id = save.agents[1].id;
+        save.agents[0].appearance = Some(serde_json::json!({"hat": "hat-01"}));
+        save.agents[0].reply_style = Some("保留這個欄位".into());
+        save.agents[1].appearance = Some(serde_json::json!({"body": "body-01"}));
+
+        let loaded =
+            apply_save_file(&base, save).expect("one bad appearance must not drop the save");
+
+        let bad = loaded.agent_by_id(bad_id).unwrap();
+        assert_eq!(
+            bad.agent.appearance, None,
+            "invalid appearance cleared to None"
+        );
+        assert_eq!(
+            bad.agent.reply_style.as_deref(),
+            Some("保留這個欄位"),
+            "the agent's other fields are untouched"
+        );
+        let good = loaded.agent_by_id(good_id).unwrap();
+        assert_eq!(
+            good.agent.appearance,
+            Some(serde_json::json!({"body": "body-01"})),
             "a valid override on another agent is preserved as-is"
         );
     }

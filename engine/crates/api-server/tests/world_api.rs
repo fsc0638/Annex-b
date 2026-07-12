@@ -69,6 +69,7 @@ fn tiny_agent(name: &str, desk_id: Uuid) -> Agent {
         pos_y: 0,
         desk_id: Some(desk_id),
         llm_profile: serde_json::json!({}),
+        appearance: None,
     }
 }
 

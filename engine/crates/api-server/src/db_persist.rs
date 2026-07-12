@@ -147,13 +147,14 @@ pub async fn save_layout(
 pub async fn save_agent(pool: &PgPool, agent: &Agent) -> Result<(), String> {
     sqlx::query(
         "update agents set name = $1, seed_traits = $2, core_identity = $3, reply_style = $4, \
-         llm_profile = $5 where id = $6",
+         llm_profile = $5, appearance = $6 where id = $7",
     )
     .bind(&agent.name)
     .bind(&agent.seed_traits)
     .bind(&agent.core_identity)
     .bind(&agent.reply_style)
     .bind(&agent.llm_profile)
+    .bind(&agent.appearance)
     .bind(agent.id)
     .execute(pool)
     .await

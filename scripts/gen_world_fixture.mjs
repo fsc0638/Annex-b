@@ -125,6 +125,13 @@ function main() {
       pos_y: desk.pos_y,
       desk_id: desk.id,
       llm_profile: {},
+      // ADR-003 D3: seed agents ship with no appearance override — null
+      // means "use the existing generated placeholder sprite" (seed_world.sh
+      // seeds all 9 agents' `appearance` column as `null` too; this is not
+      // parsed out of the seed script since the value is always the same
+      // constant for every seed agent — see seed_layout.mjs's parseAgents
+      // doc comment for what IS parsed).
+      appearance: null,
     };
   });
 

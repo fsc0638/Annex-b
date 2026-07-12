@@ -35,6 +35,15 @@ pub async fn patch_agent(
     if let Some(profile) = &patch.llm_profile {
         validate_llm_profile(profile)?;
     }
+    // ADR-003 D3: `patch.appearance` is `Option<Option<Value>>` (double
+    // Option — see AgentPatch's doc comment). Only the inner `Some(value)`
+    // case needs shape validation ("物件或 null；鍵限 body/eyes/hairstyle/
+    // outfit/accessory，值為字串或 null；未知鍵 422") — a `null` on the
+    // wire (`Some(None)`, clearing the appearance) or an absent key
+    // (outer `None`, leave untouched) are both always valid.
+    if let Some(Some(appearance)) = &patch.appearance {
+        validate_appearance(appearance)?;
+    }
 
     {
         let world = sim.world.lock().await;
@@ -75,6 +84,14 @@ pub async fn patch_agent(
 /// fall back to the tier default).
 fn validate_llm_profile(v: &Value) -> Result<(), ApiError> {
     sim_core::llm_profile::validate_llm_profile(v).map_err(ApiError::unprocessable)
+}
+
+/// Validates a non-null `appearance` payload per ADR-003 D3, delegating to
+/// the shared rule in `sim_core::appearance` (same division of labor as
+/// `validate_llm_profile` above: sim-core owns "what is a valid value",
+/// this crate only maps the `Err` into its 422 envelope).
+fn validate_appearance(v: &Value) -> Result<(), ApiError> {
+    sim_core::appearance::validate_appearance(v).map_err(ApiError::unprocessable)
 }
 
 #[cfg(test)]
@@ -128,5 +145,37 @@ mod tests {
     fn validate_llm_profile_rejects_non_object() {
         assert!(validate_llm_profile(&json!("not-an-object")).is_err());
         assert!(validate_llm_profile(&json!(["L1", "openai:gpt-4o"])).is_err());
+    }
+
+    #[test]
+    fn validate_appearance_accepts_valid_objects() {
+        assert!(validate_appearance(&json!({})).is_ok());
+        assert!(validate_appearance(&json!({
+            "body": "body-01",
+            "eyes": "eyes-03",
+            "hairstyle": "hairstyle-01-01",
+            "outfit": "outfit-05-02",
+            "accessory": null
+        }))
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_appearance_rejects_unknown_key() {
+        let err = validate_appearance(&json!({"hat": "hat-01"})).unwrap_err();
+        assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(err.message.contains("hat"));
+    }
+
+    #[test]
+    fn validate_appearance_rejects_non_string_non_null_value() {
+        let err = validate_appearance(&json!({"body": 42})).unwrap_err();
+        assert!(err.message.contains("body"));
+    }
+
+    #[test]
+    fn validate_appearance_rejects_non_object() {
+        assert!(validate_appearance(&json!("body-01")).is_err());
+        assert!(validate_appearance(&json!(["body-01"])).is_err());
     }
 }

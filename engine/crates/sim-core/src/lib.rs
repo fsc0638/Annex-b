@@ -23,6 +23,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod appearance;
 pub mod clock;
 pub mod commute;
 #[cfg(feature = "db")]
@@ -105,6 +106,17 @@ pub struct Agent {
     /// Per-agent LLM tier override, e.g. {"L1":"openai:gpt-4o-mini"}.
     /// Empty object means "use tier defaults" (section 6).
     pub llm_profile: serde_json::Value,
+    /// ADR-003 D3: layered visual customization, e.g. `{"body":"body-01",
+    /// "eyes":"eyes-03","hairstyle":"hairstyle-01-01","outfit":
+    /// "outfit-05-02","accessory":null}` — keys are piece-layer names, each
+    /// value a `web/public/character/<layer>/<id>.png` piece id (or
+    /// `null`/absent for "no piece on this layer"). Maps to
+    /// `agents.appearance jsonb` (nullable — `None` means "use the existing
+    /// generated placeholder sprite", never a failure state; shape beyond
+    /// "object or null" is validated at the API boundary, not here — see
+    /// `appearance::validate_appearance`).
+    #[serde(default)]
+    pub appearance: Option<serde_json::Value>,
 }
 
 /// Mirrors the `layout_items` table (the layout editor's data source).
