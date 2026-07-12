@@ -49,6 +49,21 @@ pub fn validate_appearance(v: &Value) -> Result<(), String> {
                 "appearance.{key} must be a string (piece id) or null, got {val}"
             ));
         }
+        // F3 fix: an empty (or whitespace-only) string can't resolve to any
+        // real `web/public/character/<layer>/<id>.png` piece — it's not a
+        // meaningful "no piece" either (that's what JSON `null` is for), so
+        // let it through as a valid piece id would just store a value that
+        // is guaranteed to fail asset lookup later. The front end's
+        // `AgentPanel` already normalizes an empty select option to `null`
+        // before PATCHing, so this only catches a hand-crafted PATCH or
+        // save file trying to smuggle one in.
+        if let Some(s) = val.as_str() {
+            if s.trim().is_empty() {
+                return Err(format!(
+                    "appearance.{key} must not be an empty string (use null to clear this layer)"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -92,5 +107,24 @@ mod tests {
     fn rejects_non_object() {
         assert!(validate_appearance(&json!("body-01")).is_err());
         assert!(validate_appearance(&json!(["body-01"])).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_string_piece_id() {
+        let err = validate_appearance(&json!({"body": ""})).unwrap_err();
+        assert!(err.contains("body"), "{err}");
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn rejects_whitespace_only_piece_id() {
+        let err = validate_appearance(&json!({"hairstyle": "   "})).unwrap_err();
+        assert!(err.contains("hairstyle"), "{err}");
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn null_still_accepted_as_the_way_to_clear_a_layer() {
+        assert!(validate_appearance(&json!({"body": null})).is_ok());
     }
 }

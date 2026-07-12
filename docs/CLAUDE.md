@@ -5,7 +5,24 @@
 
 ## 目前狀態
 
-**Phase 3 前置：玩家配置系統已完成**（2026-07-11/12，分支
+**Phase 3 前置 II：真實素材＋角色外觀已完成**（2026-07-12，分支
+`phase/3-real-assets`，基於 phase/3-player-config tip），詳見
+`docs/decisions/ADR-003-real-assets-and-character-appearance.md`。交付：
+使用者放入的 LimeZu 素材包（5 包 558MB）接入——家具庫 **5809 件單品、
+25 分類**（office＋24 室內主題；32×32 標準陰影一份，剔除尺寸/陰影重複）、
+調色盤分類/搜尋/分頁（受控載入，非全量）、畫布家具真實圖渲染（per-item
+meta.sprite→kind 代表圖→色塊三級 fallback）；**角色外觀客製化**——
+`agents.appearance jsonb` 全鏈路（PATCH 驗證/persist 防禦載入/db UPDATE）、
+432 個 Character Generator 部件（body/eyes/hairstyle/outfit/accessory）
+瀏覽器 Canvas 分層合成 32×64 走路貼圖（`character_compositor.ts`＋
+`character_frames.ts`，方向列 down=sr4/left=sr16/up=sr18/right=翻轉，
+經雙重目視驗證）、AgentPanel 五層下拉＋即時預覽＋還原預設。
+付費素材（來源＋public 複本＋character/）全部 gitignored 不進版控。
+cargo test 189 綠＋ci.sh 全 PASS＋乾淨載入 9/9 角色渲染實測。
+已知環境注意：背景/隱藏分頁會凍結 PixiJS ticker（行走內插暫停），
+正常前景瀏覽不受影響。
+
+**Phase 3 前置 I：玩家配置系統已完成**（2026-07-11/12，分支
 `phase/3-player-config`，基於 main=071330d），詳見
 `docs/decisions/ADR-002-player-config-and-editor-completion.md`。交付：
 佈局編輯器補完並掛載（三分頁 UI：監控／佈局編輯器／角色設定）、房間大小

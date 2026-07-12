@@ -60,20 +60,50 @@ export function appearanceKey(appearance: AppearanceLayers | null | undefined): 
   return JSON.stringify(CHARACTER_LAYER_ORDER.map((layer) => normalized[layer]));
 }
 
+// ---- Simple LRU helper (insertion-order Map doubles as recency order) ---
+//
+// F2 fix: both module-level caches below used to grow without bound — every
+// distinct piece PNG (imageCache) or layer combo (compositeCache) ever seen
+// this session stayed resident forever. Browsing e.g. 200 hairstyles could
+// pin ~1.8GB of decoded bitmaps. A `Map` already preserves insertion order,
+// so "oldest" == "first key returned by .keys()"; touching a key on a hit
+// (delete+re-set) promotes it to most-recently-used without needing a
+// separate linked list.
+
+function lruTouch<K, V>(cache: Map<K, V>, key: K, value: V): void {
+  cache.delete(key);
+  cache.set(key, value);
+}
+
+function lruSet<K, V>(cache: Map<K, V>, key: K, value: V, maxEntries: number): void {
+  lruTouch(cache, key, value);
+  while (cache.size > maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+}
+
 // ---- Part-image loading (HTMLImageElement, module-level cache) ----------
 
+// ~16 distinct piece sheets resident at once, comfortably under the ~150MB
+// budget the review flagged (each decoded sheet is a few MB at most).
+const IMAGE_CACHE_MAX_ENTRIES = 16;
 const imageCache = new Map<string, Promise<HTMLImageElement | null>>();
 
 function loadPieceImage(src: string): Promise<HTMLImageElement | null> {
   const existing = imageCache.get(src);
-  if (existing) return existing;
+  if (existing) {
+    lruTouch(imageCache, src, existing); // hit: refresh recency
+    return existing;
+  }
   const pending = new Promise<HTMLImageElement | null>((resolve) => {
     const img = new Image();
     img.onload = () => resolve(img);
     img.onerror = () => resolve(null);
     img.src = src;
   });
-  imageCache.set(src, pending);
+  lruSet(imageCache, src, pending, IMAGE_CACHE_MAX_ENTRIES);
   return pending;
 }
 
@@ -88,6 +118,19 @@ function pieceFile(
 
 // ---- Composite build (module-level cache keyed by appearanceKey) --------
 
+// 32 composited 96x256 sheets resident at once. Eviction here only affects
+// re-composition cost (a cache miss re-draws from `imageCache`'d/loaded part
+// PNGs) — it must NOT invalidate any Pixi `Texture` already built from a
+// canvas this cache previously returned. OfficeCanvas's own
+// `characterTextureCache` (game/OfficeCanvas.tsx) calls `Texture.from(canvas)`
+// once per key and keeps the resulting `Texture[][]`; Pixi's canvas source
+// copies/uploads the canvas's pixels to the GPU at that point and holds its
+// own reference to the canvas element for the texture's lifetime — it does
+// not look the canvas back up in this module's `compositeCache`. So evicting
+// a key here is safe: it only means a *future* `compositeCharacter()` call
+// for that key rebuilds the canvas from scratch; textures already created
+// from an earlier build keep working untouched.
+const COMPOSITE_CACHE_MAX_ENTRIES = 32;
 const compositeCache = new Map<string, Promise<HTMLCanvasElement | null>>();
 
 async function buildComposite(
@@ -161,9 +204,12 @@ export function compositeCharacter(
   if (!manifest || isEmptyAppearance(appearance)) return Promise.resolve(null);
   const key = appearanceKey(appearance);
   const existing = compositeCache.get(key);
-  if (existing) return existing;
+  if (existing) {
+    lruTouch(compositeCache, key, existing); // hit: refresh recency
+    return existing;
+  }
   const pending = buildComposite(appearance!, manifest).catch(() => null);
-  compositeCache.set(key, pending);
+  lruSet(compositeCache, key, pending, COMPOSITE_CACHE_MAX_ENTRIES);
   return pending;
 }
 

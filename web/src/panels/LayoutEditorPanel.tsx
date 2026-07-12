@@ -430,12 +430,20 @@ export default function LayoutEditorPanel({ send }: LayoutEditorPanelProps) {
   function updateDraftLayout(
     updater: (current: LayoutItemRow[]) => LayoutItemRow[]
   ) {
-    setLocalLayout((current) => {
-      if (!current) return current;
-      const next = updater(current);
-      publishDraftLayout(next);
-      return next;
-    });
+    // F1 fix: `next` is computed here, in the event-handler body, off the
+    // existing `localLayout` state variable — not inside a `setLocalLayout`
+    // functional updater. `publishDraftLayout` calls `useGameStore.setState`
+    // internally, and calling that from inside a functional updater meant a
+    // store update was triggered synchronously during React's render phase
+    // (functional updaters can run during render), which React flags as
+    // "Cannot update a component while rendering a different component"
+    // (fired at high frequency during furniture drag). All 5 call sites
+    // already guard `!localLayout` before calling this, so `localLayout` is
+    // guaranteed non-null here.
+    if (!localLayout) return;
+    const next = updater(localLayout);
+    setLocalLayout(next);
+    publishDraftLayout(next);
   }
 
   function restoreDraftBase() {

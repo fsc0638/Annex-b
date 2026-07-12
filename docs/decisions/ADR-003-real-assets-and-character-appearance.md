@@ -11,13 +11,16 @@
   家具單品（`Modern_Office_Singles_32x32_N.png`，數字命名）。ADR-002 的 sync
   腳本已認得這批。
 - **moderninteriors-win**（5 萬張主體）：`1_Interiors/32x32/
-  Theme_Sorter_Singles_32x32/<主題>/` 底下 **26 個主題**分類單品（會議廳、客廳、
-  廚房、浴室、教室圖書館、藝術、地下室、博物館、臥室、日式…等）。同素材另有
-  16/48 尺寸與 Black_Shadow/Shadowless 兩種陰影變體（**重複，本輪不納入**）。
-  另有 `2_Characters/Character_Generator/` 角色部件（與下方 Character Generator
-  包重複）。
+  Theme_Sorter_Singles_32x32/<主題>/` 底下主題分類單品（會議廳、客廳、
+  廚房、浴室、教室圖書館、藝術、地下室、博物館、臥室、日式…等）。
+  **實測修正（2026-07-12 實作時）：套件實際只有 24 個主題資料夾**（編號
+  2–16、18–26；1_ 與 17_ 不存在，經 find 驗證）——本檔初稿寫 26 為掃描摘要
+  高估。同素材另有 16/48 尺寸與 Black_Shadow/Shadowless 兩種陰影變體
+  （**重複，本輪不納入**）。另有 `2_Characters/Character_Generator/` 角色部件
+  （與下方 Character Generator 包重複）。
 - **Character Generator 2.0 Linux Build**：`Character Pieces/` 分層部件——
-  Bodies(10)/Eyes(7)/Hairstyles(200)/Outfits(132)/Accessories(84)＋各 _kids 變體。
+  Bodies(9，另有 1 個 byte-identical 誤複製檔已被 sync 略過)/Eyes(7)/
+  Hairstyles(200)/Outfits(132)/Accessories(84)＝432 件＋各 _kids 變體（不納入）。
   **每個部件是 1792×1280 的大張分層動畫表**（56×40 格 ×32px，含 idle/走路/睡覺/
   推車等全動畫）。另有 `0_Premade_Characters/32x32/` 20 個預組角色（1792×1312）。
 - **Modern_Interiors_Free_v2.2**（win 版子集，重複）、**Modern_Interiors_RPG_Maker_
