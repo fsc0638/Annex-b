@@ -36,11 +36,76 @@ export interface AgentRow {
   /** ADR-002 D5: free-text "how this agent replies" customization.
    * Nullable/optional — pre-migration rows and mock snapshots may omit it. */
   reply_style?: string | null;
-  /** Character appearance layers (backend already ships this on
-   * world_snapshot as of the character-backend rollout). Type-only for
-   * now — actual sprite composition/rendering is a future wave; do not
-   * wire this into OfficeCanvas rendering yet. */
-  appearance?: Record<string, string | null> | null;
+  /** Character appearance layers (ADR-003 D3). `null` (or omitted) means
+   * "use the generated placeholder sprite" — OfficeCanvas's `/sprites/
+   * agents/<sprite_key>.png` fallback, unchanged. A present object may be
+   * PARTIAL (the engine stores exactly whatever object was last PATCHed —
+   * see `sim_core::appearance::validate_appearance`, which allows any
+   * subset of the five known layer keys); a missing key means "no piece on
+   * this layer", same as an explicit `null` value. Always normalize via
+   * `normalizeAppearance` (web/src/lib/character_compositor.ts) before
+   * indexing all five layers. */
+  appearance?: AppearanceLayers | null;
+}
+
+/** The five ADR-003 D3 character appearance layers, in the order the
+ * purchased asset's `Character Pieces/CHARACTER_GENERATOR.txt` documents
+ * for compositing (body -> eyes -> outfit -> hairstyle -> accessory) —
+ * NOT alphabetical and NOT the manifest's own key order, so this is the
+ * single source of truth both the compositor and AgentPanel's form/preview
+ * must iterate in. */
+export const CHARACTER_LAYER_ORDER = [
+  "body",
+  "eyes",
+  "outfit",
+  "hairstyle",
+  "accessory",
+] as const;
+
+export type CharacterLayerKey = (typeof CHARACTER_LAYER_ORDER)[number];
+
+/** One agent's per-layer piece selection. Each value is a piece `id` from
+ * `CharacterManifest.layers[layer]`, or `null`/absent for "no piece on
+ * this layer". Partial by construction (see `AgentRow.appearance` doc). */
+export type AppearanceLayers = Partial<Record<CharacterLayerKey, string | null>>;
+
+/** One selectable piece in the character manifest (GET
+ * /character/manifest.json, ADR-003 D3), e.g.
+ * `{id:"hairstyle-01-02", file:"/character/hairstyle/hairstyle-01-02.png",
+ * label:"髮型 01-02"}`. */
+export interface CharacterManifestPiece {
+  id: string;
+  file: string;
+  label: string;
+}
+
+/** One resolved walk-cycle frame's source rectangle, mirroring
+ * `WalkFrameRect` from `web/src/lib/character_frames.ts` (duplicated here,
+ * not imported, so this file — a plain wire-type module like the rest of
+ * types.ts — has no dependency on that lib module; the two shapes are kept
+ * in sync by construction since `scripts/sync_character_pieces.mjs`
+ * literally serializes `character_frames.ts`'s own `walkFrameRects()`
+ * output into this JSON field). */
+export interface CharacterManifestWalkFrame {
+  sx: number;
+  sy: number;
+  w: number;
+  h: number;
+  flipX: boolean;
+}
+
+/** GET /character/manifest.json shape (ADR-003 D3), produced by
+ * `scripts/sync_character_pieces.mjs`. Fetched once and shared via the
+ * store's `characterManifest` (`ensureCharacterManifestLoaded`), mirroring
+ * the `furnitureManifest` pattern — AgentPanel's appearance editor/preview
+ * and OfficeCanvas's character compositor both read it from there instead
+ * of fetching independently. */
+export interface CharacterManifest {
+  layers: Record<CharacterLayerKey, CharacterManifestPiece[]>;
+  frame: { w: number; h: number };
+  walk: Record<string, CharacterManifestWalkFrame[]>;
+  generatedFrom?: string;
+  generatedAt?: string;
 }
 
 export interface LayoutItemRow {

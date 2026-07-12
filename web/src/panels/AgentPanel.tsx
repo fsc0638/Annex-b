@@ -14,10 +14,34 @@
 // Spec red line (ADR-002 D5 / 規格書 §5.3 附錄A): only these five fields
 // are ever exposed. No "服從/敵對/關係" control may be added here.
 
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { apiJson, ApiError } from "@/api/client";
 import { useGameStore } from "@/game/store";
-import type { AgentRow, WorldSnapshotMsg } from "@/game/types";
+import {
+  CHARACTER_LAYER_ORDER,
+  type AgentRow,
+  type AppearanceLayers,
+  type CharacterLayerKey,
+  type WorldSnapshotMsg,
+} from "@/game/types";
+import {
+  compositeCharacter,
+  isEmptyAppearance,
+  normalizeAppearance,
+  standingFrameRect,
+} from "@/lib/character_compositor";
+import { CHAR_FRAME } from "@/lib/character_frames";
+
+// ADR-003 D3: display order/labels for the "外觀" editor's 5 layer
+// dropdowns — reuses CHARACTER_LAYER_ORDER (the compositing stack order)
+// as the display order too, since there's no reason for them to diverge.
+const LAYER_LABELS: Record<CharacterLayerKey, string> = {
+  body: "身體",
+  eyes: "眼睛",
+  outfit: "服裝",
+  hairstyle: "髮型",
+  accessory: "配件",
+};
 
 type TierKey = "L1" | "L2" | "L3";
 const TIERS: TierKey[] = ["L1", "L2", "L3"];
@@ -45,6 +69,11 @@ interface AgentFormState {
   coreIdentity: string;
   replyStyle: string;
   llmProfile: Record<TierKey, string>;
+  /** `null` = "use the generated placeholder sprite" (ADR-003 D3). A
+   * present object may be partial (missing keys read as "無" in the
+   * dropdowns, same as an explicit `null` value) — see `AgentRow.
+   * appearance`'s doc comment. */
+  appearance: AppearanceLayers | null;
 }
 
 function buildForm(agent: AgentRow): AgentFormState {
@@ -58,7 +87,20 @@ function buildForm(agent: AgentRow): AgentFormState {
     coreIdentity: agent.core_identity,
     replyStyle: agent.reply_style ?? "",
     llmProfile,
+    appearance: agent.appearance ?? null,
   };
+}
+
+/** `appearance` equality for dirty-checking / patch-building, treating
+ * `null` and "an object whose layers are all null/absent" as the SAME
+ * state (both render as the placeholder sprite — see `isEmptyAppearance`)
+ * so toggling every dropdown back to "無" by hand doesn't falsely count as
+ * a change from an agent that already had `appearance: null`. */
+function appearancesEqual(a: AppearanceLayers | null, b: AppearanceLayers | null): boolean {
+  const aEmpty = isEmptyAppearance(a);
+  const bEmpty = isEmptyAppearance(b);
+  if (aEmpty || bEmpty) return aEmpty === bEmpty;
+  return JSON.stringify(normalizeAppearance(a)) === JSON.stringify(normalizeAppearance(b));
 }
 
 /** Canonical string for a (partial) llm_profile object, for equality checks
@@ -94,6 +136,15 @@ function buildPatch(agent: AgentRow, form: AgentFormState): Record<string, unkno
     patch.llm_profile = nextProfile;
   }
 
+  // ADR-003 D3: "appearance 整包送或 null" — never a bare partial object,
+  // so the engine's stored value is always exactly what the 5 dropdowns
+  // showed at save time (no ambiguity about which keys were "unchanged").
+  if (!appearancesEqual(form.appearance, agent.appearance ?? null)) {
+    patch.appearance = isEmptyAppearance(form.appearance)
+      ? null
+      : normalizeAppearance(form.appearance);
+  }
+
   return patch;
 }
 
@@ -112,13 +163,83 @@ function formHasErrors(form: AgentFormState): boolean {
 export default function AgentPanel() {
   const agents = useGameStore((state) => state.agents);
   const conn = useGameStore((state) => state.conn);
+  // ADR-003 D3: same store-shared manifest pattern as furnitureManifest —
+  // `ensureCharacterManifestLoaded` is idempotent, so it's safe to call
+  // from this panel's mount even if OfficeCanvas already kicked off (or
+  // finished) the same fetch.
+  const characterManifest = useGameStore((state) => state.characterManifest);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<AgentFormState | null>(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const readOnly = conn === "mock";
+
+  useEffect(() => {
+    useGameStore.getState().ensureCharacterManifestLoaded();
+  }, []);
+
+  // Live appearance preview: recomposites (via the same cache OfficeCanvas
+  // uses) whenever the edited form's appearance selection or the manifest
+  // itself changes, and draws the "down, standing" frame into the preview
+  // canvas at 3x scale (pixelated — imageSmoothingEnabled off). Clears the
+  // canvas (and lets the "使用預設佔位角色" caption take over, see JSX
+  // below) for an empty/default appearance instead of drawing anything.
+  useEffect(() => {
+    const canvas = previewCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!form || isEmptyAppearance(form.appearance)) return;
+    let cancelled = false;
+    void compositeCharacter(form.appearance, characterManifest).then((sheet) => {
+      if (cancelled || !sheet) return;
+      const liveCanvas = previewCanvasRef.current;
+      const liveCtx = liveCanvas?.getContext("2d");
+      if (!liveCanvas || !liveCtx) return;
+      liveCtx.imageSmoothingEnabled = false;
+      liveCtx.clearRect(0, 0, liveCanvas.width, liveCanvas.height);
+      const rect = standingFrameRect("down");
+      liveCtx.drawImage(
+        sheet,
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        0,
+        0,
+        liveCanvas.width,
+        liveCanvas.height
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Intentionally NOT depending on the whole `form` object: every other
+    // field (name/seedTraits/...) also creates a new `form` reference on
+    // each keystroke, which would re-run this effect (and redundantly
+    // re-hit compositeCharacter's cache) on every unrelated edit. Only
+    // `form.appearance`'s own identity (which `updateAppearanceLayer`/
+    // `resetAppearance` change) and the manifest matter for what gets
+    // drawn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form?.appearance, characterManifest]);
+
+  function updateAppearanceLayer(layer: CharacterLayerKey, pieceId: string) {
+    setForm((prev) => {
+      if (!prev) return prev;
+      const next = { ...normalizeAppearance(prev.appearance) };
+      next[layer] = pieceId === "" ? null : pieceId;
+      return { ...prev, appearance: next };
+    });
+  }
+
+  function resetAppearance() {
+    setForm((prev) => (prev ? { ...prev, appearance: null } : prev));
+  }
 
   const agentsList = Object.values(agents).sort((a, b) =>
     a.name.localeCompare(b.name, "zh-Hant")
@@ -409,6 +530,71 @@ export default function AgentPanel() {
                                 })}
                               </div>
                             </div>
+
+                            <details className="rounded-md border border-slate-800 bg-slate-950/40 px-3 py-2">
+                              <summary className="cursor-pointer text-xs font-medium text-slate-200">
+                                外觀
+                              </summary>
+                              <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-[1fr_auto]">
+                                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                  {CHARACTER_LAYER_ORDER.map((layer) => {
+                                    const pieces = characterManifest?.layers[layer] ?? [];
+                                    const value = form.appearance?.[layer] ?? "";
+                                    return (
+                                      <label key={layer} className="block text-xs">
+                                        <span className="mb-1 block font-medium text-slate-300">
+                                          {LAYER_LABELS[layer]}
+                                        </span>
+                                        <select
+                                          value={value}
+                                          disabled={!characterManifest}
+                                          onChange={(e) =>
+                                            updateAppearanceLayer(layer, e.target.value)
+                                          }
+                                          className="w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-1.5 text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                        >
+                                          <option value="">無</option>
+                                          {pieces.map((piece) => (
+                                            <option key={piece.id} value={piece.id}>
+                                              {piece.label}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                    );
+                                  })}
+                                  {!characterManifest && (
+                                    <p className="text-[11px] text-slate-500 sm:col-span-2">
+                                      角色部件素材尚未同步，外觀選項暫不可用（畫面沿用預設佔位角色）。
+                                    </p>
+                                  )}
+                                  <div className="sm:col-span-2">
+                                    <button
+                                      type="button"
+                                      onClick={resetAppearance}
+                                      className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-[11px] font-medium text-slate-200 hover:bg-slate-700"
+                                    >
+                                      還原預設外觀
+                                    </button>
+                                  </div>
+                                </div>
+                                <div className="flex flex-col items-center gap-1">
+                                  <span className="text-[11px] text-slate-500">預覽</span>
+                                  <canvas
+                                    ref={previewCanvasRef}
+                                    width={CHAR_FRAME.w * 3}
+                                    height={CHAR_FRAME.h * 3}
+                                    style={{ imageRendering: "pixelated" }}
+                                    className="rounded-md border border-slate-700 bg-slate-900"
+                                  />
+                                  {isEmptyAppearance(form.appearance) && (
+                                    <span className="w-24 text-center text-[11px] text-slate-600">
+                                      使用預設佔位角色
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </details>
 
                             {formError && (
                               <p className="rounded-md border border-rose-800 bg-rose-950/50 px-2 py-1.5 text-[11px] text-rose-300">

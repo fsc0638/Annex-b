@@ -23,10 +23,17 @@ import {
   Texture,
 } from "pixi.js";
 import { apiJson } from "@/api/client";
+import {
+  appearanceKey,
+  compositeCharacter,
+  isEmptyAppearance,
+} from "@/lib/character_compositor";
+import { CHAR_FRAME } from "@/lib/character_frames";
 import { useGameStore } from "./store";
 import {
   footprintOf,
   type AgentRow,
+  type CharacterManifest,
   type FurnitureManifest,
   type FurnitureManifestEntry,
   type LayoutItemRow,
@@ -97,11 +104,31 @@ interface FurnitureSpriteEntry {
 interface AgentVisual {
   root: Container;
   sprite: AnimatedSprite;
+  label: Text;
   texturesByDir: Texture[][];
   dir: number;
   targetX: number;
   targetY: number;
   status: string;
+  /** Frame height currently applied (TILE=32 for the generated placeholder
+   * sheet, CHAR_FRAME.h=64 for a composited custom-appearance sheet) — the
+   * extra height grows upward from the tile's bottom edge so feet stay
+   * planted; see `visualOffsetY`. */
+  frameH: number;
+  /** `appearanceKey(agent.appearance)` this visual's textures currently
+   * reflect. `syncAgents` compares this against the live agent on every
+   * snapshot and, on a mismatch, swaps just the textures/offsets in place
+   * (`applyAppearance`) rather than rebuilding the whole Container — ADR-003
+   * D3 "appearance 變更 → 換 texture 不重建整個 visual". */
+  appearanceKey: string;
+}
+
+/** Vertical sprite offset so a `frameH`-tall sprite's BOTTOM edge lands on
+ * the tile's own bottom edge (y=TILE within `root`), same as the
+ * TILE-tall placeholder always has — a taller (32x64) composited sheet
+ * grows entirely upward (head room), never shifting the feet. */
+function visualOffsetY(frameH: number): number {
+  return TILE - frameH;
 }
 
 interface TmjDoc {
@@ -133,6 +160,36 @@ function sliceSpriteSheet(sheet: Texture): Texture[][] {
         new Texture({
           source: sheet.source,
           frame: new Rectangle(col * TILE, dir * TILE, TILE, TILE),
+        })
+      );
+    }
+    byDir.push(frames);
+  }
+  return byDir;
+}
+
+// ADR-003 D3: same 4-direction x 3-frame slicing as `sliceSpriteSheet`
+// above, but for a browser-composited character sheet
+// (character_compositor.ts's COMPOSITE_SHEET_W x COMPOSITE_SHEET_H canvas,
+// wrapped in `Texture.from(canvas)` by the caller). Frames are CHAR_FRAME
+// (32x64) instead of TILE (32x32) — the row order matches
+// DIR_DOWN/DIR_LEFT/DIR_RIGHT/DIR_UP exactly (both this sheet and
+// character_frames.ts's WALK_DIRS use down/left/right/up), so row index
+// doubles as the same dir constant with no remapping.
+function sliceCharacterSheet(sheet: Texture): Texture[][] {
+  const byDir: Texture[][] = [];
+  for (let dir = 0; dir < 4; dir++) {
+    const frames: Texture[] = [];
+    for (let col = 0; col < 3; col++) {
+      frames.push(
+        new Texture({
+          source: sheet.source,
+          frame: new Rectangle(
+            col * CHAR_FRAME.w,
+            dir * CHAR_FRAME.h,
+            CHAR_FRAME.w,
+            CHAR_FRAME.h
+          ),
         })
       );
     }
@@ -534,6 +591,7 @@ export default function OfficeCanvas() {
       let lastAgents: Record<string, AgentRow> | null = null;
       let lastEditing = false;
       let lastFurnitureManifest: FurnitureManifest | null = null;
+      let lastCharacterManifest: CharacterManifest | null = null;
 
       // ---- Furniture sprites (ADR-003 D2) ------------------------------
       // Kind-level defaults (10 entries, from manifest.sprites) are small
@@ -638,6 +696,12 @@ export default function OfficeCanvas() {
         lastFurnitureManifest = initialFurnitureManifest;
         void applyFurnitureManifest(initialFurnitureManifest);
       }
+      // ADR-003 D3: same idempotent-fetch kickoff for the character
+      // manifest. `lastCharacterManifest` (declared further below, once
+      // `characterTextureCache` exists) is what actually reacts to it
+      // arriving — this call just ensures the fetch is in flight as early
+      // as possible regardless of which component mounts first.
+      useGameStore.getState().ensureCharacterManifestLoaded();
 
       // ---- Map from tmj + tileset -------------------------------------
       // Live mode: TMJ comes from the store's GET /api/v1/world/map cache
@@ -759,19 +823,68 @@ export default function OfficeCanvas() {
         stroke: { color: 0x000000, width: 3 },
       });
 
-      async function buildVisual(agent: AgentRow): Promise<AgentVisual> {
+      // ADR-003 D3: custom-appearance textures, cached by appearanceKey (not
+      // by agent id) — two agents wearing the identical outfit share one
+      // composited/sliced texture set, and the promise itself is the
+      // in-flight guard (mirrors `materialTextureCache` above / `visuals`
+      // below): a second concurrent call for the same key gets the same
+      // promise instead of re-compositing. Resolves `null` (never rejects)
+      // when the manifest isn't loaded yet or the composite failed, so
+      // callers fall back to the placeholder sheet.
+      const characterTextureCache = new Map<string, Promise<Texture[][] | null>>();
+
+      function ensureCharacterTexture(
+        key: string,
+        appearance: AgentRow["appearance"]
+      ): Promise<Texture[][] | null> {
+        const existing = characterTextureCache.get(key);
+        if (existing) return existing;
+        const pending = compositeCharacter(
+          appearance,
+          useGameStore.getState().characterManifest
+        )
+          .then((canvas) => {
+            if (!canvas) return null;
+            const tex = Texture.from(canvas);
+            tex.source.scaleMode = "nearest";
+            return sliceCharacterSheet(tex);
+          })
+          .catch(() => null);
+        characterTextureCache.set(key, pending);
+        return pending;
+      }
+
+      /** Resolves the texturesByDir + frame height to use for `agent` right
+       * now: the composited custom-appearance sheet when one is selected
+       * AND composites successfully, else the generated placeholder sheet
+       * (agent's own `sprite_key`.png — always present, never fails per
+       * ADR-003 D3's "appearance＝null 永不回退失敗"). */
+      async function resolveVisualTextures(
+        agent: AgentRow
+      ): Promise<{ texturesByDir: Texture[][]; frameH: number }> {
+        const key = appearanceKey(agent.appearance);
+        if (!isEmptyAppearance(agent.appearance)) {
+          const custom = await ensureCharacterTexture(key, agent.appearance);
+          if (custom) return { texturesByDir: custom, frameH: CHAR_FRAME.h };
+        }
         const sheetTex = (await Assets.load(
           `/sprites/agents/${agent.sprite_key}.png`
         )) as Texture;
         sheetTex.source.scaleMode = "nearest";
-        const texturesByDir = sliceSpriteSheet(sheetTex);
+        return { texturesByDir: sliceSpriteSheet(sheetTex), frameH: TILE };
+      }
+
+      async function buildVisual(agent: AgentRow): Promise<AgentVisual> {
+        const { texturesByDir, frameH } = await resolveVisualTextures(agent);
+        const offsetY = visualOffsetY(frameH);
         const sprite = new AnimatedSprite(texturesByDir[DIR_DOWN]);
         sprite.animationSpeed = ANIM_SPEED_BASE;
         sprite.gotoAndStop(1);
+        sprite.y = offsetY;
         const label = new Text({ text: agent.name, style: labelStyle });
         label.anchor.set(0.5, 1);
         label.x = TILE / 2;
-        label.y = -2;
+        label.y = offsetY - 2;
         const root = new Container();
         root.addChild(sprite, label);
         root.visible = false;
@@ -779,15 +892,62 @@ export default function OfficeCanvas() {
         const visual: AgentVisual = {
           root,
           sprite,
+          label,
           texturesByDir,
           dir: DIR_DOWN,
           targetX: agent.pos_x * TILE,
           targetY: agent.pos_y * TILE,
           status: agent.current_status,
+          frameH,
+          appearanceKey: appearanceKey(agent.appearance),
         };
         root.x = visual.targetX;
         root.y = visual.targetY;
         return visual;
+      }
+
+      /** ADR-003 D3: "appearance 變更 → 換 texture 不重建整個 visual". Called
+       * from `syncAgents` for every already-resolved visual on every
+       * snapshot; no-ops (synchronously, before any await) unless the
+       * agent's current appearance key actually differs from what this
+       * visual last applied — cheap enough to call unconditionally per
+       * sync. Setting `v.appearanceKey` BEFORE the await is the
+       * concurrency guard: a second call landing while this one is still
+       * in flight (two snapshots arriving close together) sees the key
+       * already matches and bails immediately, same spirit as
+       * `ensureVisual`'s promise-map guard but for an in-place field swap
+       * rather than a whole new Container. */
+      async function applyAppearance(agent: AgentRow, v: AgentVisual) {
+        const key = appearanceKey(agent.appearance);
+        if (key === v.appearanceKey) return;
+        const previousKey = v.appearanceKey;
+        v.appearanceKey = key;
+        let resolved: { texturesByDir: Texture[][]; frameH: number };
+        try {
+          resolved = await resolveVisualTextures(agent);
+        } catch (err) {
+          // resolveVisualTextures's placeholder fallback (Assets.load) can
+          // still reject on a transient failure. Revert appearanceKey to
+          // what this visual last successfully applied so the NEXT
+          // syncAgents() pass retries instead of permanently treating the
+          // failed key as "already applied" (self-heal, mirrors
+          // ensureVisual's evict-and-retry contract) — and never let this
+          // fire-and-forget call surface as an unhandled rejection.
+          v.appearanceKey = previousKey;
+          console.warn(`[sim] appearance swap failed for ${agent.name}`, err);
+          return;
+        }
+        if (cancelled || resolvedVisuals.get(agent.id) !== v) return;
+        const { texturesByDir, frameH } = resolved;
+        v.texturesByDir = texturesByDir;
+        v.frameH = frameH;
+        const offsetY = visualOffsetY(frameH);
+        v.sprite.y = offsetY;
+        v.label.y = offsetY - 2;
+        const playing = v.sprite.playing;
+        v.sprite.textures = texturesByDir[v.dir];
+        if (playing) v.sprite.play();
+        else v.sprite.gotoAndStop(1);
       }
 
       function ensureVisual(agent: AgentRow): Promise<AgentVisual> {
@@ -853,6 +1013,12 @@ export default function OfficeCanvas() {
             warnVisualLoadFailure(agent, err);
             continue;
           }
+          // Fire-and-forget: applyAppearance no-ops synchronously unless
+          // the appearance key actually changed, and swallows its own
+          // failures internally (falls back to whatever textures were
+          // already applied) — never awaited so a slow composite can't
+          // stall this agent's position/status update below.
+          void applyAppearance(agent, v);
           const tx = agent.pos_x * TILE;
           const ty = agent.pos_y * TILE;
           if (tx !== v.targetX || ty !== v.targetY) {
@@ -911,6 +1077,25 @@ export default function OfficeCanvas() {
         }
       }
 
+      // ADR-003 D3: the character manifest can arrive AFTER an agent with a
+      // custom appearance was already synced (composite attempted against
+      // `characterManifest === null`, which `compositeCharacter` resolves
+      // to `null` for — cached forever under that appearanceKey unless
+      // evicted). Once the manifest actually lands, clear the whole cache
+      // (cheap: it only ever holds a handful of distinct outfits) and
+      // reset every currently-resolved visual's `appearanceKey` to a value
+      // that can never equal a real key, forcing `applyAppearance` to
+      // recompute on the very next `syncAgents` pass.
+      function applyCharacterManifest() {
+        characterTextureCache.clear();
+        for (const v of resolvedVisuals.values()) v.appearanceKey = "__stale__";
+        if (lastAgents) {
+          void syncAgents(lastAgents).catch((err) => {
+            console.error("[sim] syncAgents (character manifest arrival) failed", err);
+          });
+        }
+      }
+
       // Initial state + subscription (zustand vanilla subscribe).
       const applyState = (
         layout: LayoutItemRow[],
@@ -965,6 +1150,12 @@ export default function OfficeCanvas() {
         lastFurnitureManifest = initial.furnitureManifest;
         void applyFurnitureManifest(initial.furnitureManifest);
       }
+      // Same "already arrived during the async gap" catch-up as the
+      // furniture manifest above, for the character manifest.
+      if (initial.characterManifest && initial.characterManifest !== lastCharacterManifest) {
+        lastCharacterManifest = initial.characterManifest;
+        applyCharacterManifest();
+      }
       unsubscribe = useGameStore.subscribe((state) => {
         applyState(
           state.layout,
@@ -984,6 +1175,10 @@ export default function OfficeCanvas() {
         if (state.furnitureManifest && state.furnitureManifest !== lastFurnitureManifest) {
           lastFurnitureManifest = state.furnitureManifest;
           void applyFurnitureManifest(state.furnitureManifest);
+        }
+        if (state.characterManifest && state.characterManifest !== lastCharacterManifest) {
+          lastCharacterManifest = state.characterManifest;
+          applyCharacterManifest();
         }
       });
 

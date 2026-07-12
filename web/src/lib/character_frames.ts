@@ -17,15 +17,19 @@
 // sheet-row pair, addressed here by its top row index `row` (= 2k).
 //
 // ============================================================================
-// TODO(commander-verify): walk frame columns were picked by visually
+// 驗證狀態（2026-07-12 指揮官裁決）：方向列（down=sr4/left=sr16/up=sr18/
+// right=左翻轉）已經雙重目視驗證確認——(a) 指揮官的 _charpoc 逐列合成檢視、
+// (b) 實作 agent 的 PIL 合成比對（排除了 sr0/sr2 這兩個無腿部動作的偽候選）。
+// 乾淨載入下 9 名角色（含 32x64 客製外觀）渲染位置/朝向皆正確。步幅欄位
+// [1,2,4] 為合理裁決值：若日後在真實桌面瀏覽器观察行走動畫覺得步態不順，
+// 只需微調下方 WALK_FRAMES 的 cols（單一常數，無其他改動）。
+// ----------------------------------------------------------------------------
+// 原始挑選方法（保留供日後參考）：walk frame columns were picked by visually
 // inspecting composited (body+outfit+hair) crops of the candidate rows with
 // PIL (see session scratchpad), NOT from vendor documentation — LimeZu ships
 // no animation-row index in this package (only Character Pieces/
 // CHARACTER_GENERATOR.txt, which documents layer stacking order, not
-// animation rows). The picks below are a structurally-reasonable first
-// guess; please zoom into the real PNGs (or watch the composited walk
-// texture in the running app) and adjust `WALK_FRAMES` if a direction looks
-// wrong. Specifically:
+// animation rows). Specifically:
 //   - DOWN: rows sr0-sr14 (8 row-pairs) are ALL front-facing but are 8
 //     DIFFERENT idle-type animations (bow/greet, hands-clasped, a close-up
 //     pose, sitting, phone-to-ear, holding-object, ...) — only sr4 showed

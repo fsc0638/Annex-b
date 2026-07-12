@@ -5,6 +5,7 @@
 import { create } from "zustand";
 import type {
   AgentRow,
+  CharacterManifest,
   FurnitureManifest,
   LayoutItemRow,
   LayoutValidation,
@@ -21,6 +22,12 @@ export type FurnitureManifestStatus = "idle" | "loading" | "ok" | "missing";
 // shared by LayoutEditorPanel (material browser) and OfficeCanvas
 // (furniture sprites) via the store instead of each fetching it separately.
 const FURNITURE_MANIFEST_URL = "/tilesets/limezu-modern-office/manifest.json";
+
+// ADR-003 D3: same single-fetch-shared-via-store pattern as the furniture
+// manifest above, for the character appearance part catalog. Shared by
+// AgentPanel (appearance editor dropdowns + live preview) and OfficeCanvas
+// (character compositor input) so a given page load only fetches it once.
+const CHARACTER_MANIFEST_URL = "/character/manifest.json";
 
 /** The main shell's three tabs (app/page.tsx). Mirrored into the store so
  * OfficeCanvas — whose camera handlers live outside React's render tree —
@@ -80,6 +87,15 @@ export interface GameState {
   furnitureManifest: FurnitureManifest | null;
   furnitureManifestStatus: FurnitureManifestStatus;
 
+  /** Parsed `/character/manifest.json` (ADR-003 D3), or `null` before the
+   * first successful fetch / when the character-generator asset package
+   * isn't synced (`scripts/sync_character_pieces.mjs` never ran / found no
+   * source). Shared between AgentPanel's appearance editor and
+   * OfficeCanvas's character compositor — see
+   * `ensureCharacterManifestLoaded`. */
+  characterManifest: CharacterManifest | null;
+  characterManifestStatus: FurnitureManifestStatus;
+
   setConn: (c: ConnState) => void;
   applyServerMsg: (msg: ServerMsg) => void;
   clearError: () => void;
@@ -97,6 +113,12 @@ export interface GameState {
    * synchronous, so even two calls in the same render tick can't race into
    * a double-fetch); later callers just read the cached result/status. */
   ensureFurnitureManifestLoaded: () => void;
+  /** Idempotent: fetches `GET /character/manifest.json` once and caches the
+   * parsed result — same idempotency contract as
+   * `ensureFurnitureManifestLoaded` (safe to call from every component
+   * that needs it; only the first caller while status is "idle" issues
+   * the fetch). */
+  ensureCharacterManifestLoaded: () => void;
 }
 
 export const useGameStore = create<GameState>((set, get) => ({
@@ -116,6 +138,8 @@ export const useGameStore = create<GameState>((set, get) => ({
   activeTab: "monitor",
   furnitureManifest: null,
   furnitureManifestStatus: "idle",
+  characterManifest: null,
+  characterManifestStatus: "idle",
 
   setConn: (c) => set({ conn: c }),
   clearError: () => set({ lastError: null }),
@@ -142,6 +166,28 @@ export const useGameStore = create<GameState>((set, get) => ({
       })
       .catch(() => {
         set({ furnitureManifest: null, furnitureManifestStatus: "missing" });
+      });
+  },
+  ensureCharacterManifestLoaded: () => {
+    if (get().characterManifestStatus !== "idle") return;
+    set({ characterManifestStatus: "loading" });
+    fetch(CHARACTER_MANIFEST_URL, { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((manifest: CharacterManifest | null) => {
+        if (
+          manifest &&
+          typeof manifest === "object" &&
+          manifest.layers &&
+          manifest.frame &&
+          manifest.walk
+        ) {
+          set({ characterManifest: manifest, characterManifestStatus: "ok" });
+        } else {
+          set({ characterManifest: null, characterManifestStatus: "missing" });
+        }
+      })
+      .catch(() => {
+        set({ characterManifest: null, characterManifestStatus: "missing" });
       });
   },
 
